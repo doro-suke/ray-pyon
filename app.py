@@ -176,8 +176,9 @@ nikkin_requirements = []
 for i, day in enumerate(weekdays):
     with cols[i]:
         default_val = 1 if day == "金" else 0 if day in ["土", "日"] else 2
-        nikkin_requirements.append(st.number_input(f"{day}曜", min_value=0, max_value=staff_count, value=default_val, key=f"nikkin_{i}"))
-
+        # ラベルを漢字一文字に変更
+        nikkin_requirements.append(st.number_input(day, min_value=0, max_value=staff_count, value=default_val, key=f"nikkin_{i}"))
+        
 st.header("4. スタッフごとの希望")
 holiday_requests = {}
 work_requests = {}
