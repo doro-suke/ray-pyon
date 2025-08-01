@@ -32,12 +32,14 @@ def create_shift_schedule(year, month, staff_names, holiday_requests, work_reque
     # --- 制約 ---
     # C1: 必要人数
     for d_idx, date in enumerate(dates):
+        # 当直は毎日1人
         is_on_duty = [model.NewBoolVar(f'd{d_idx}_s{s_idx}_is_duty') for s_idx in range(staff_count)]
         for s_idx in range(staff_count):
             model.Add(shifts[(s_idx, d_idx)] == works["当直"]).OnlyEnforceIf(is_on_duty[s_idx])
             model.Add(shifts[(s_idx, d_idx)] != works["当直"]).OnlyEnforceIf(is_on_duty[s_idx].Not())
         model.Add(sum(is_on_duty) == 1)
         
+        # 曜日ごとの日勤人数ルール
         required_nikkin = nikkin_requirements[date.weekday()]
         if required_nikkin > 0:
             is_on_nikkin = [model.NewBoolVar(f'd{d_idx}_s{s_idx}_is_nikkin') for s_idx in range(staff_count)]
@@ -46,15 +48,9 @@ def create_shift_schedule(year, month, staff_names, holiday_requests, work_reque
                 model.Add(shifts[(s_idx, d_idx)] != works["日勤"]).OnlyEnforceIf(is_on_nikkin[s_idx].Not())
             model.Add(sum(is_on_nikkin) == required_nikkin)
         
-        if date.weekday() == 6 or date.day in holidays:
-            for s_idx in range(staff_count):
-                is_duty_h = model.NewBoolVar(f'd{d_idx}_s{s_idx}_is_duty_h')
-                model.Add(shifts[(s_idx, d_idx)] == works["当直"]).OnlyEnforceIf(is_duty_h)
-                model.Add(shifts[(s_idx, d_idx)] != works["当直"]).OnlyEnforceIf(is_duty_h.Not())
-                is_ake_h = model.NewBoolVar(f'd{d_idx}_s{s_idx}_is_ake_h')
-                model.Add(shifts[(s_idx, d_idx)] == works["明け"]).OnlyEnforceIf(is_ake_h)
-                model.Add(shifts[(s_idx, d_idx)] != works["明け"]).OnlyEnforceIf(is_ake_h.Not())
-                model.Add(shifts[(s_idx, d_idx)] == works["公休"]).OnlyEnforceIf(is_duty_h.Not()).OnlyEnforceIf(is_ake_h.Not())
+        # ▼▼▼【修正点】祝日に関する古いルールを削除しました ▼▼▼
+        # このセクションを削除することで、祝日や日曜日にも日勤を割り当てられるようになります。
+        # ▲▲▲ 修正完了 ▲▲▲
 
     # C2: 当直→明け→公休ルール
     for s_idx in range(staff_count):
@@ -153,7 +149,6 @@ def create_shift_schedule(year, month, staff_names, holiday_requests, work_reque
 st.set_page_config(page_title="レイぴょん", layout="wide")
 st.title("🏥 レイぴょん - シフト自動作成")
 
-# --- 入力セクション ---
 st.header("1. 基本設定")
 col1, col2, col3 = st.columns(3)
 with col1:
@@ -163,20 +158,16 @@ with col2:
 with col3:
     staff_count = st.number_input("スタッフ人数", min_value=1, max_value=20, value=6, key="staff_count")
 
-# ▼▼▼【ここからが追加部分です】▼▼▼
 st.header("2. スタッフの名前")
 default_names = ["山田", "鈴木", "佐藤", "田中", "高橋", "渡辺", "伊藤", "山本", "中村", "小林",
                  "加藤", "吉田", "山口", "松本", "井上", "木村", "林", "佐々木", "清水", "山崎"]
 staff_names = []
-# 2列で名前を入力
 name_cols = st.columns(2)
 for i in range(staff_count):
     with name_cols[i % 2]:
         staff_names.append(
             st.text_input(f"スタッフ {i+1}の名前", value=default_names[i] if i < len(default_names) else f"スタッフ{i+1}", key=f"name_{i}")
         )
-# ▲▲▲ 追加完了 ▲▲▲
-
 
 st.header("3. 曜日ごとの日勤人数")
 weekdays = ["月", "火", "水", "木", "金", "土", "日"]
@@ -192,7 +183,6 @@ holiday_requests = {}
 work_requests = {}
 all_days = list(range(1, calendar.monthrange(year, month)[1] + 1))
 
-# 3列でスタッフの希望を入力
 num_columns = 3
 cols = st.columns(num_columns)
 for i, name in enumerate(staff_names):
@@ -205,10 +195,8 @@ for i, name in enumerate(staff_names):
                 "出勤希望", options=all_days, key=f"w_{i}"
             )
 
-# --- 実行と結果表示 ---
 st.header("5. シフト作成")
 if st.button("🚀 シフトを作成する", type="primary"):
-    # 名前の重複チェック
     if len(staff_names) != len(set(staff_names)):
         st.error("エラー: スタッフの名前が重複しています。それぞれ違う名前にしてください。")
     else:
@@ -219,14 +207,12 @@ if st.button("🚀 シフトを作成する", type="primary"):
             st.success("✅ シフトの作成に成功しました！")
             st.dataframe(df)
 
-            # サマリー計算
             summary_df = pd.DataFrame(index=df.index)
             summary_df['勤務日数'] = df.apply(lambda row: (row != '公休').sum(), axis=1)
             summary_df['当直回数'] = df.apply(lambda row: (row == '当直').sum(), axis=1)
             st.subheader("サマリー")
             st.dataframe(summary_df)
 
-            # CSVダウンロードボタン
             csv = df.to_csv(index=True, encoding='utf-8-sig').encode('utf-8-sig')
             st.download_button(
                 label="📄 CSVファイルをダウンロード",
