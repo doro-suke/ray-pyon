@@ -140,7 +140,8 @@ def create_shift_schedule(year, month, staff_names, holiday_requests, work_reque
         for s_idx, s_name in enumerate(staff_names):
             schedule[s_name] = [works_inv[solver.Value(shifts[(s_idx, d_idx)])] for d_idx in range(num_days)]
         df = pd.DataFrame(schedule).T
-        weekdays_jp = ["月", "火", "水", "木", "金", "土", "日"] df.columns = [f"{date.day} ({weekdays_jp[date.weekday()]})" for date in dates]
+        weekdays_jp = ["月", "火", "水", "木", "金", "土", "日"] 
+        df.columns = [f"{date.day} ({weekdays_jp[date.weekday()]})" for date in dates]
         return df, "success"
     else:
         return None, "failed"
