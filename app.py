@@ -206,10 +206,11 @@ if st.button("🚀 シフトを作成する", type="primary"):
             df, status = create_shift_schedule(year, month, staff_names, holiday_requests, work_requests, nikkin_requirements)
 
         if status == "success":
-            st.success("✅ シフトの作成に成功しました！")
-            st.dataframe(df)
+            st.success("✅ シフトの作成に成功しました！表のセルをクリックして直接編集できます。")
+            edited_df = st.data_editor(df) # ← st.dataframe を st.data_editor に変更
 
-            summary_df = pd.DataFrame(index=df.index)
+            # サマリー計算 (編集後のデータで計算)
+            summary_df = pd.DataFrame(index=edited_df.index)
             summary_df['勤務日数'] = df.apply(lambda row: (row != '公休').sum(), axis=1)
             summary_df['当直回数'] = df.apply(lambda row: (row == '当直').sum(), axis=1)
             st.subheader("サマリー")
