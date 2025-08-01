@@ -95,9 +95,11 @@ def create_shift_schedule(year, month, staff_count, holiday_requests, work_reque
     for s_idx in range(staff_count):
         s_name = f"No.{s_idx+1}"
         for day_off in holiday_requests.get(s_name, []):
-            model.Add(shifts[(s_idx, day_off - 1)] == works["公休"])
+            if 1 <= day_off <= num_days:
+                model.Add(shifts[(s_idx, day_off - 1)] == works["公休"])
         for day_on in work_requests.get(s_name, []):
-            model.Add(shifts[(s_idx, day_on - 1)] != works["公休"])
+            if 1 <= day_on <= num_days:
+                model.Add(shifts[(s_idx, day_on - 1)] != works["公休"])
 
     # C5: 総勤務日数
     for s_idx in range(staff_count):
@@ -148,8 +150,8 @@ def create_shift_schedule(year, month, staff_count, holiday_requests, work_reque
         return None, "failed"
 
 # --- ここからがStreamlitのUI部分 ---
-st.set_page_config(page_title="シフト自動作成アプリ", layout="wide")
-st.title("🏥 シフト自動作成アプリ")
+st.set_page_config(page_title="レイぴょん", layout="wide")
+st.title("🏥 レイぴょん - シフト自動作成")
 
 # --- 入力セクション ---
 st.header("1. 基本設定")
@@ -172,4 +174,37 @@ cols = st.columns(num_columns)
 for i in range(staff_count):
     with cols[i % num_columns]:
         with st.expander(f"**スタッフ No.{i+1} の希望**", expanded=True):
-            holiday_requests[f"No.{i+1}"] =
+            holiday_requests[f"No.{i+1}"] = st.multiselect(
+                "希望休", options=all_days, key=f"h_{i}"
+            )
+            work_requests[f"No.{i+1}"] = st.multiselect(
+                "出勤希望", options=all_days, key=f"w_{i}"
+            )
+
+# --- 実行と結果表示 ---
+st.header("3. シフト作成")
+if st.button("🚀 シフトを作成する", type="primary"):
+    with st.spinner("最適なシフトを計算中です..."):
+        df, status = create_shift_schedule(year, month, staff_count, holiday_requests, work_requests)
+
+    if status == "success":
+        st.success("✅ シフトの作成に成功しました！")
+        st.dataframe(df)
+
+        # サマリー計算
+        summary_df = pd.DataFrame(index=df.index)
+        summary_df['勤務日数'] = df.apply(lambda row: (row != '公休').sum(), axis=1)
+        summary_df['当直回数'] = df.apply(lambda row: (row == '当直').sum(), axis=1)
+        st.subheader("サマリー")
+        st.dataframe(summary_df)
+
+        # CSVダウンロードボタン
+        csv = df.to_csv(index=True, encoding='utf-8-sig').encode('utf-8-sig')
+        st.download_button(
+            label="📄 CSVファイルをダウンロード",
+            data=csv,
+            file_name=f"shift_{year}_{month}.csv",
+            mime="text/csv",
+        )
+    else:
+        st.error("❌ シフトの作成に失敗しました。条件が厳しすぎる可能性があります（例：希望休と出勤希望が重複しているなど）。")
