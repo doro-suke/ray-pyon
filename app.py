@@ -6,7 +6,7 @@ import calendar
 from datetime import datetime
 
 # --- シフト作成のコアロジック（関数として定義） ---
-def create_shift_schedule(year, month, staff_names, holiday_requests, work_requests, nikkin_requirements):
+def create_shift_schedule(year, month, staff_names, holiday_requests, work_requests, nikkin_requirements, fixed_shifts):
     """
     与えられた条件でシフトを計算する関数
     """
@@ -91,6 +91,20 @@ def create_shift_schedule(year, month, staff_names, holiday_requests, work_reque
             if 1 <= day_on <= num_days:
                 model.Add(shifts[(s_idx, day_on - 1)] != works["公休"])
 
+    # ▼▼▼【ここからが追加部分です】▼▼▼
+    # C4.5: 固定された勤務の制約
+    for fix in fixed_shifts:
+        s_name = fix['staff']
+        day = fix['day']
+        work = fix['work']
+        if s_name in staff_names:
+            s_idx = staff_names.index(s_name)
+            d_idx = day - 1
+            work_id = works.get(work)
+            if work_id is not None:
+                model.Add(shifts[(s_idx, d_idx)] == work_id)
+    # ▲▲▲ 追加完了 ▲▲▲
+
     # C5: 総勤務日数
     for s_idx in range(staff_count):
         work_days_bools = [model.NewBoolVar(f's{s_idx}_d{d_idx}_is_work') for d_idx in range(num_days)]
@@ -144,7 +158,6 @@ def create_shift_schedule(year, month, staff_names, holiday_requests, work_reque
 st.set_page_config(page_title="レイぴょん", layout="wide")
 st.title("🏥 レイぴょん - シフト自動作成")
 
-# --- 入力セクション ---
 st.header("1. 基本設定")
 col1, col2, col3 = st.columns(3)
 with col1:
@@ -191,48 +204,76 @@ for i, name in enumerate(staff_names):
                 "出勤希望", options=all_days, key=f"w_{i}"
             )
 
+# ▼▼▼【ここからが追加部分です】▼▼▼
+st.header("5. 特定の勤務を固定する（オプション）")
+
+# session_state を使って固定シフトのリストを記憶する
+if 'fixed_shifts' not in st.session_state:
+    st.session_state.fixed_shifts = []
+
+# 固定シフトを追加するUI
+col1, col2, col3, col4 = st.columns([2, 1, 1, 1])
+with col1:
+    fixed_name = st.selectbox("スタッフを選択", options=staff_names, key="fix_name", index=None, placeholder="名前を選択...")
+with col2:
+    fixed_day = st.selectbox("日付を選択", options=all_days, key="fix_day", index=None, placeholder="日を選択...")
+with col3:
+    fixed_work = st.selectbox("勤務を選択", options=["日勤", "半日", "当直", "明け"], key="fix_work", index=None, placeholder="勤務を選択...")
+with col4:
+    st.write("") 
+    st.write("")
+    if st.button("追加", key="add_fix"):
+        if fixed_name and fixed_day and fixed_work:
+            new_fix = {'staff': fixed_name, 'day': fixed_day, 'work': fixed_work}
+            # 重複を避ける
+            if new_fix not in st.session_state.fixed_shifts:
+                st.session_state.fixed_shifts.append(new_fix)
+        else:
+            st.warning("スタッフ、日付、勤務をすべて選択してください。")
+
+# 現在固定されているシフトの表示とクリアボタン
+if st.session_state.fixed_shifts:
+    st.write("---")
+    st.write("現在固定されている勤務:")
+    for i, fix in enumerate(st.session_state.fixed_shifts):
+        st.write(f"・ {fix['day']}日: **{fix['staff']}**さんを「**{fix['work']}**」に固定")
+    if st.button("固定をすべてクリア", key="clear_fix"):
+        st.session_state.fixed_shifts = []
+        st.rerun() # 画面をリフレッシュ
+# ▲▲▲ 追加完了 ▲▲▲
+
 # --- 実行と結果表示 ---
-st.header("5. シフト作成")
+st.header("6. シフト作成")
 
-# ▼▼▼【ここからが修正部分です】▼▼▼
-
-# st.session_state を使って、生成したシフト表を記憶する
 if 'schedule_df' not in st.session_state:
     st.session_state.schedule_df = None
 
-# 「シフトを作成する」ボタンが押されたときの処理
 if st.button("🚀 シフトを作成する", type="primary"):
     if len(staff_names) != len(set(staff_names)):
         st.error("エラー: スタッフの名前が重複しています。それぞれ違う名前にしてください。")
-        st.session_state.schedule_df = None # エラー時は表を消す
+        st.session_state.schedule_df = None
     else:
         with st.spinner("最適なシフトを計算中です..."):
-            df, status = create_shift_schedule(year, month, staff_names, holiday_requests, work_requests, nikkin_requirements)
+            df, status = create_shift_schedule(year, month, staff_names, holiday_requests, work_requests, nikkin_requirements, st.session_state.fixed_shifts)
 
         if status == "success":
-            # 成功したら結果を記憶
             st.session_state.schedule_df = df
         else:
-            # 失敗したら記憶をクリアしてエラー表示
             st.session_state.schedule_df = None
-            st.error("❌ シフトの作成に失敗しました。条件が厳しすぎる可能性があります（例：希望休と出勤希望が重複しているなど）。")
+            st.error("❌ シフトの作成に失敗しました。条件が厳しすぎる可能性があります（例：希望休と出勤希望が重複、固定シフトと希望休が重複など）。")
 
-# 記憶されたシフト表がある場合に、常に表示・編集できるようにする
 if st.session_state.schedule_df is not None:
     st.success("✅ シフト表が表示されました。下の表のセルは直接編集できます。")
     
-    # data_editorで編集機能を有効化し、編集結果を session_state に上書き保存する
     edited_df = st.data_editor(st.session_state.schedule_df, key="shift_editor")
     st.session_state.schedule_df = edited_df
 
     st.subheader("サマリー（手直し後）")
-    # 編集後のデータでサマリーを再計算
     summary_df = pd.DataFrame(index=edited_df.index)
     summary_df['勤務日数'] = edited_df.apply(lambda row: (row != '公休').sum(), axis=1)
     summary_df['当直回数'] = edited_df.apply(lambda row: (row == '当直').sum(), axis=1)
     st.dataframe(summary_df)
 
-    # 編集後のデータでCSVをダウンロード
     csv = edited_df.to_csv(index=True, encoding='utf-8-sig').encode('utf-8-sig')
     st.download_button(
         label="📄 編集後のシフト表をダウンロード",
@@ -240,4 +281,3 @@ if st.session_state.schedule_df is not None:
         file_name=f"shift_{year}_{month}_edited.csv",
         mime="text/csv",
     )
-# ▲▲▲ 修正完了 ▲▲▲
