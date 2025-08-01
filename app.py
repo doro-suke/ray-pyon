@@ -32,14 +32,12 @@ def create_shift_schedule(year, month, staff_names, holiday_requests, work_reque
     # --- 制約 ---
     # C1: 必要人数
     for d_idx, date in enumerate(dates):
-        # 当直は毎日1人
         is_on_duty = [model.NewBoolVar(f'd{d_idx}_s{s_idx}_is_duty') for s_idx in range(staff_count)]
         for s_idx in range(staff_count):
             model.Add(shifts[(s_idx, d_idx)] == works["当直"]).OnlyEnforceIf(is_on_duty[s_idx])
             model.Add(shifts[(s_idx, d_idx)] != works["当直"]).OnlyEnforceIf(is_on_duty[s_idx].Not())
         model.Add(sum(is_on_duty) == 1)
         
-        # 曜日ごとの日勤人数ルール
         required_nikkin = nikkin_requirements[date.weekday()]
         if required_nikkin > 0:
             is_on_nikkin = [model.NewBoolVar(f'd{d_idx}_s{s_idx}_is_nikkin') for s_idx in range(staff_count)]
@@ -47,10 +45,6 @@ def create_shift_schedule(year, month, staff_names, holiday_requests, work_reque
                 model.Add(shifts[(s_idx, d_idx)] == works["日勤"]).OnlyEnforceIf(is_on_nikkin[s_idx])
                 model.Add(shifts[(s_idx, d_idx)] != works["日勤"]).OnlyEnforceIf(is_on_nikkin[s_idx].Not())
             model.Add(sum(is_on_nikkin) == required_nikkin)
-        
-        # ▼▼▼【修正点】祝日に関する古いルールを削除しました ▼▼▼
-        # このセクションを削除することで、祝日や日曜日にも日勤を割り当てられるようになります。
-        # ▲▲▲ 修正完了 ▲▲▲
 
     # C2: 当直→明け→公休ルール
     for s_idx in range(staff_count):
@@ -140,7 +134,7 @@ def create_shift_schedule(year, month, staff_names, holiday_requests, work_reque
         for s_idx, s_name in enumerate(staff_names):
             schedule[s_name] = [works_inv[solver.Value(shifts[(s_idx, d_idx)])] for d_idx in range(num_days)]
         df = pd.DataFrame(schedule).T
-        weekdays_jp = ["月", "火", "水", "木", "金", "土", "日"] 
+        weekdays_jp = ["月", "火", "水", "木", "金", "土", "日"]
         df.columns = [f"{date.day} ({weekdays_jp[date.weekday()]})" for date in dates]
         return df, "success"
     else:
@@ -150,6 +144,7 @@ def create_shift_schedule(year, month, staff_names, holiday_requests, work_reque
 st.set_page_config(page_title="レイぴょん", layout="wide")
 st.title("🏥 レイぴょん - シフト自動作成")
 
+# --- 入力セクション ---
 st.header("1. 基本設定")
 col1, col2, col3 = st.columns(3)
 with col1:
@@ -177,9 +172,8 @@ nikkin_requirements = []
 for i, day in enumerate(weekdays):
     with cols[i]:
         default_val = 1 if day == "金" else 0 if day in ["土", "日"] else 2
-        # ラベルを漢字一文字に変更
         nikkin_requirements.append(st.number_input(day, min_value=0, max_value=staff_count, value=default_val, key=f"nikkin_{i}"))
-        
+
 st.header("4. スタッフごとの希望")
 holiday_requests = {}
 work_requests = {}
@@ -199,33 +193,51 @@ for i, name in enumerate(staff_names):
 
 # --- 実行と結果表示 ---
 st.header("5. シフト作成")
+
+# ▼▼▼【ここからが修正部分です】▼▼▼
+
+# st.session_state を使って、生成したシフト表を記憶する
+if 'schedule_df' not in st.session_state:
+    st.session_state.schedule_df = None
+
+# 「シフトを作成する」ボタンが押されたときの処理
 if st.button("🚀 シフトを作成する", type="primary"):
     if len(staff_names) != len(set(staff_names)):
         st.error("エラー: スタッフの名前が重複しています。それぞれ違う名前にしてください。")
+        st.session_state.schedule_df = None # エラー時は表を消す
     else:
         with st.spinner("最適なシフトを計算中です..."):
             df, status = create_shift_schedule(year, month, staff_names, holiday_requests, work_requests, nikkin_requirements)
 
         if status == "success":
-            st.success("✅ シフトの作成に成功しました！下の表のセルは直接編集できます。")
-            
-            # st.dataframe を st.data_editor に変更して編集機能を有効化
-            edited_df = st.data_editor(df, key="shift_editor")
-
-            st.subheader("サマリー（手直し後）")
-            # 編集後のデータでサマリーを再計算
-            summary_df = pd.DataFrame(index=edited_df.index)
-            summary_df['勤務日数'] = edited_df.apply(lambda row: (row != '公休').sum(), axis=1)
-            summary_df['当直回数'] = edited_df.apply(lambda row: (row == '当直').sum(), axis=1)
-            st.dataframe(summary_df)
-
-            # 編集後のデータでCSVをダウンロード
-            csv = edited_df.to_csv(index=True, encoding='utf-8-sig').encode('utf-8-sig')
-            st.download_button(
-                label="📄 編集後のシフト表をダウンロード",
-                data=csv,
-                file_name=f"shift_{year}_{month}_edited.csv",
-                mime="text/csv",
-            )
+            # 成功したら結果を記憶
+            st.session_state.schedule_df = df
         else:
+            # 失敗したら記憶をクリアしてエラー表示
+            st.session_state.schedule_df = None
             st.error("❌ シフトの作成に失敗しました。条件が厳しすぎる可能性があります（例：希望休と出勤希望が重複しているなど）。")
+
+# 記憶されたシフト表がある場合に、常に表示・編集できるようにする
+if st.session_state.schedule_df is not None:
+    st.success("✅ シフト表が表示されました。下の表のセルは直接編集できます。")
+    
+    # data_editorで編集機能を有効化し、編集結果を session_state に上書き保存する
+    edited_df = st.data_editor(st.session_state.schedule_df, key="shift_editor")
+    st.session_state.schedule_df = edited_df
+
+    st.subheader("サマリー（手直し後）")
+    # 編集後のデータでサマリーを再計算
+    summary_df = pd.DataFrame(index=edited_df.index)
+    summary_df['勤務日数'] = edited_df.apply(lambda row: (row != '公休').sum(), axis=1)
+    summary_df['当直回数'] = edited_df.apply(lambda row: (row == '当直').sum(), axis=1)
+    st.dataframe(summary_df)
+
+    # 編集後のデータでCSVをダウンロード
+    csv = edited_df.to_csv(index=True, encoding='utf-8-sig').encode('utf-8-sig')
+    st.download_button(
+        label="📄 編集後のシフト表をダウンロード",
+        data=csv,
+        file_name=f"shift_{year}_{month}_edited.csv",
+        mime="text/csv",
+    )
+# ▲▲▲ 修正完了 ▲▲▲
