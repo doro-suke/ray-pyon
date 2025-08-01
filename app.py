@@ -197,6 +197,7 @@ for i, name in enumerate(staff_names):
                 "出勤希望", options=all_days, key=f"w_{i}"
             )
 
+# --- 実行と結果表示 ---
 st.header("5. シフト作成")
 if st.button("🚀 シフトを作成する", type="primary"):
     if len(staff_names) != len(set(staff_names)):
@@ -206,21 +207,24 @@ if st.button("🚀 シフトを作成する", type="primary"):
             df, status = create_shift_schedule(year, month, staff_names, holiday_requests, work_requests, nikkin_requirements)
 
         if status == "success":
-            st.success("✅ シフトの作成に成功しました！表のセルをクリックして直接編集できます。")
-            edited_df = st.data_editor(df) # ← st.dataframe を st.data_editor に変更
+            st.success("✅ シフトの作成に成功しました！下の表のセルは直接編集できます。")
+            
+            # st.dataframe を st.data_editor に変更して編集機能を有効化
+            edited_df = st.data_editor(df, key="shift_editor")
 
-            # サマリー計算 (編集後のデータで計算)
+            st.subheader("サマリー（手直し後）")
+            # 編集後のデータでサマリーを再計算
             summary_df = pd.DataFrame(index=edited_df.index)
-            summary_df['勤務日数'] = df.apply(lambda row: (row != '公休').sum(), axis=1)
-            summary_df['当直回数'] = df.apply(lambda row: (row == '当直').sum(), axis=1)
-            st.subheader("サマリー")
+            summary_df['勤務日数'] = edited_df.apply(lambda row: (row != '公休').sum(), axis=1)
+            summary_df['当直回数'] = edited_df.apply(lambda row: (row == '当直').sum(), axis=1)
             st.dataframe(summary_df)
 
-            csv = df.to_csv(index=True, encoding='utf-8-sig').encode('utf-8-sig')
+            # 編集後のデータでCSVをダウンロード
+            csv = edited_df.to_csv(index=True, encoding='utf-8-sig').encode('utf-8-sig')
             st.download_button(
-                label="📄 CSVファイルをダウンロード",
+                label="📄 編集後のシフト表をダウンロード",
                 data=csv,
-                file_name=f"shift_{year}_{month}.csv",
+                file_name=f"shift_{year}_{month}_edited.csv",
                 mime="text/csv",
             )
         else:
