@@ -133,17 +133,7 @@ def create_shift_schedule(year, month, staff_names, holiday_requests, work_reque
 st.set_page_config(page_title="レイぴょん", layout="wide")
 st.title("🏥 レイぴょん - シフト自動作成")
 
-# ▼▼▼【ここからが修正部分です】▼▼▼
-# ローカルストレージの初期化
 localS = LocalStorage()
-
-# 保存された設定を読み込む関数
-def get_state(key, default_value):
-    return localS.getItem(key) or default_value
-
-# 設定を保存する関数
-def set_state(key, value):
-    localS.setItem(key, value)
 
 # --- 入力セクション ---
 st.header("1. 基本設定")
@@ -153,9 +143,9 @@ with col1:
 with col2:
     month = st.number_input("対象月", min_value=1, max_value=12, value=datetime.now().month)
 with col3:
-    # 保存された人数を読み込み、変更されたら保存する
-    saved_staff_count = get_state('staff_count', 6)
-    staff_count = st.number_input("スタッフ人数", min_value=1, max_value=20, value=saved_staff_count, key="staff_count", on_change=lambda: set_state('staff_count', st.session_state.staff_count))
+    # 保存された人数を読み込んでデフォルト値に設定
+    saved_staff_count = localS.getItem('staff_count') or 6
+    staff_count = st.number_input("スタッフ人数", min_value=1, max_value=20, value=saved_staff_count, key="staff_count")
 
 st.header("2. スタッフの名前")
 default_names = ["山田", "鈴木", "佐藤", "田中", "高橋", "渡辺", "伊藤", "山本", "中村", "小林",
@@ -164,10 +154,20 @@ staff_names = []
 name_cols = st.columns(2)
 for i in range(staff_count):
     with name_cols[i % 2]:
-        # 保存された名前を読み込み、変更されたら保存する
-        saved_name = get_state(f'staff_name_{i}', default_names[i] if i < len(default_names) else f"スタッフ{i+1}")
-        staff_name = st.text_input(f"スタッフ {i+1}の名前", value=saved_name, key=f"name_{i}", on_change=lambda i=i: set_state(f'staff_name_{i}', st.session_state[f'name_{i}']))
-        staff_names.append(staff_name)
+        # 保存された名前を読み込んでデフォルト値に設定
+        saved_name = localS.getItem(f'staff_name_{i}') or (default_names[i] if i < len(default_names) else f"スタッフ{i+1}")
+        staff_names.append(st.text_input(f"スタッフ {i+1}の名前", value=saved_name, key=f"name_{i}"))
+
+# ▼▼▼【ここからが修正部分です】▼▼▼
+# 変更があった場合にローカルストレージに保存するロジック
+# このブロックはUI要素の *後* に配置するのが安全です
+if saved_staff_count != staff_count:
+    localS.setItem('staff_count', staff_count)
+
+for i, name in enumerate(staff_names):
+    saved_name = localS.getItem(f'staff_name_{i}') or (default_names[i] if i < len(default_names) else f"スタッフ{i+1}")
+    if saved_name != name:
+        localS.setItem(f'staff_name_{i}', name)
 # ▲▲▲ 修正完了 ▲▲▲
 
 st.header("3. 曜日ごとの日勤人数")
