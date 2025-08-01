@@ -6,7 +6,7 @@ import calendar
 from datetime import datetime
 from streamlit_local_storage import LocalStorage
 
-# --- シフト作成のコアロジック（変更なし） ---
+# --- シフト作成のコアロ-ジック（変更なし） ---
 def create_shift_schedule(year, month, staff_names, holiday_requests, work_requests, nikkin_requirements, fixed_shifts):
     staff_count = len(staff_names)
     works = {"公休": 0, "日勤": 1, "半日": 2, "当直": 3, "明け": 4}
@@ -143,7 +143,6 @@ with col1:
 with col2:
     month = st.number_input("対象月", min_value=1, max_value=12, value=datetime.now().month)
 with col3:
-    # 保存された人数を読み込んでデフォルト値に設定
     saved_staff_count = localS.getItem('staff_count') or 6
     staff_count = st.number_input("スタッフ人数", min_value=1, max_value=20, value=saved_staff_count, key="staff_count")
 
@@ -154,21 +153,8 @@ staff_names = []
 name_cols = st.columns(2)
 for i in range(staff_count):
     with name_cols[i % 2]:
-        # 保存された名前を読み込んでデフォルト値に設定
         saved_name = localS.getItem(f'staff_name_{i}') or (default_names[i] if i < len(default_names) else f"スタッフ{i+1}")
         staff_names.append(st.text_input(f"スタッフ {i+1}の名前", value=saved_name, key=f"name_{i}"))
-
-# ▼▼▼【ここからが修正部分です】▼▼▼
-# 変更があった場合にローカルストレージに保存するロジック
-# このブロックはUI要素の *後* に配置するのが安全です
-if saved_staff_count != staff_count:
-    localS.setItem('staff_count', staff_count)
-
-for i, name in enumerate(staff_names):
-    saved_name = localS.getItem(f'staff_name_{i}') or (default_names[i] if i < len(default_names) else f"スタッフ{i+1}")
-    if saved_name != name:
-        localS.setItem(f'staff_name_{i}', name)
-# ▲▲▲ 修正完了 ▲▲▲
 
 st.header("3. 曜日ごとの日勤人数")
 weekdays = ["月", "火", "水", "木", "金", "土", "日"]
@@ -176,8 +162,27 @@ cols = st.columns(7)
 nikkin_requirements = []
 for i, day in enumerate(weekdays):
     with cols[i]:
-        default_val = 1 if day == "金" else 0 if day in ["土", "日"] else 2
-        nikkin_requirements.append(st.number_input(day, min_value=0, max_value=staff_count, value=default_val, key=f"nikkin_{i}"))
+        # ▼▼▼【修正点】保存された値を読み込む ▼▼▼
+        default_val = 1 if i == 4 else 0 if i >= 5 else 2 # 月曜=0, 金曜=4, 土曜=5
+        saved_nikkin_count = localS.getItem(f'nikkin_{i}') or default_val
+        nikkin_requirements.append(st.number_input(day, min_value=0, max_value=staff_count, value=saved_nikkin_count, key=f"nikkin_{i}"))
+        
+# ▼▼▼【修正点】変更を検知して保存するロジックを追加 ▼▼▼
+# スタッフ人数・名前の保存
+if saved_staff_count != staff_count:
+    localS.setItem('staff_count', staff_count)
+
+for i, name in enumerate(staff_names):
+    saved_name = localS.getItem(f'staff_name_{i}') or (default_names[i] if i < len(default_names) else f"スタッフ{i+1}")
+    if saved_name != name:
+        localS.setItem(f'staff_name_{i}', name)
+
+# 曜日ごとの日勤人数の保存
+for i in range(7):
+    saved_nikkin_count = localS.getItem(f'nikkin_{i}') or (1 if i == 4 else 0 if i >= 5 else 2)
+    if saved_nikkin_count != nikkin_requirements[i]:
+        localS.setItem(f'nikkin_{i}', nikkin_requirements[i])
+# ▲▲▲ 修正完了 ▲▲▲
 
 st.header("4. スタッフごとの希望")
 holiday_requests = {}
@@ -189,12 +194,8 @@ cols = st.columns(num_columns)
 for i, name in enumerate(staff_names):
     with cols[i % num_columns]:
         with st.expander(f"**{name}さんの希望**", expanded=True):
-            holiday_requests[name] = st.multiselect(
-                "希望休", options=all_days, key=f"h_{i}"
-            )
-            work_requests[name] = st.multiselect(
-                "出勤希望", options=all_days, key=f"w_{i}"
-            )
+            holiday_requests[name] = st.multiselect("希望休", options=all_days, key=f"h_{i}")
+            work_requests[name] = st.multiselect("出勤希望", options=all_days, key=f"w_{i}")
 
 st.header("5. 特定の勤務を固定する（オプション）")
 if 'fixed_shifts' not in st.session_state:
