@@ -9,17 +9,9 @@ from streamlit_local_storage import LocalStorage
 # --- シフト作成のコアロジック（関数として定義） ---
 def create_shift_schedule(year, month, staff_names, holiday_requests, work_requests, nikkin_requirements, fixed_shifts):
     staff_count = len(staff_names)
-    
-    # ▼▼▼【修正点】内部的な勤務名の定義を変更 ▼▼▼
     works = {"公休": 0, "日勤": 1, "半日": 2, "当直": 3, "明け": 4}
-    # ▲▲▲ 修正完了 ▲▲▲
-
-    # ▼▼▼【修正点】表示用の記号と労働時間を定義 ▼▼▼
     work_symbols = {"公休": "ヤ", "日勤": "", "半日": "半", "当直": "△", "明け": "▲"}
     work_hours = {"公休": 0, "日勤": 8, "半日": 4, "当直": 16, "明け": 0}
-    # ▲▲▲ 修正完了 ▲▲▲
-
-    # 内部IDから表示記号への変換辞書を作成
     works_inv_symbols = {v: work_symbols[k] for k, v in works.items()}
 
     try:
@@ -43,7 +35,6 @@ def create_shift_schedule(year, month, staff_names, holiday_requests, work_reque
             shifts[(s_idx, d_idx)] = model.NewIntVar(0, len(works) - 1, f"shift_s{s_idx}_d{d_idx}")
 
     # --- 制約 ---
-    # C1: 必要人数
     for d_idx, date in enumerate(dates):
         is_on_duty = [model.NewBoolVar(f'd{d_idx}_s{s_idx}_is_duty') for s_idx in range(staff_count)]
         for s_idx in range(staff_count):
@@ -64,7 +55,6 @@ def create_shift_schedule(year, month, staff_names, holiday_requests, work_reque
                     model.Add(shifts[(s_idx, d_idx)] != works["日勤"]).OnlyEnforceIf(is_on_nikkin[s_idx].Not())
                 model.Add(sum(is_on_nikkin) == required_nikkin)
 
-    # C2: 当直→明け→公休ルール
     for s_idx in range(staff_count):
         for d_idx in range(num_days):
             is_duty_today = model.NewBoolVar(f's{s_idx}_d{d_idx}_is_duty_c2')
@@ -89,7 +79,6 @@ def create_shift_schedule(year, month, staff_names, holiday_requests, work_reque
                 model.Add(shifts[(s_idx, d_idx+1)] != works["公休"]).OnlyEnforceIf(is_off_tomorrow.Not())
                 model.AddImplication(is_ake_today, is_off_tomorrow)
 
-    # C3: 連続勤務
     max_consecutive_days = 4
     for s_idx in range(staff_count):
         for d_idx in range(num_days - max_consecutive_days):
@@ -99,7 +88,6 @@ def create_shift_schedule(year, month, staff_names, holiday_requests, work_reque
                 model.Add(shifts[(s_idx, day_index)] != works["公休"]).OnlyEnforceIf(is_off_in_window[i].Not())
             model.Add(sum(is_off_in_window) >= 1)
 
-    # C4: 希望休, 出勤希望, 固定シフト
     for s_idx, s_name in enumerate(staff_names):
         for day_off in holiday_requests.get(s_name, []):
             if 1 <= day_off <= num_days:
@@ -111,7 +99,6 @@ def create_shift_schedule(year, month, staff_names, holiday_requests, work_reque
         s_name = fix['staff']
         day = fix['day']
         work_symbol = fix['work']
-        # 表示記号から内部名に変換
         work_name = next((name for name, sym in work_symbols.items() if sym == work_symbol), None)
         if s_name in staff_names and work_name:
             s_idx = staff_names.index(s_name)
@@ -120,7 +107,6 @@ def create_shift_schedule(year, month, staff_names, holiday_requests, work_reque
             if work_id is not None:
                 model.Add(shifts[(s_idx, d_idx)] == work_id)
 
-    # C5: 総労働時間を目標値に近づける
     total_hours_per_staff = [model.NewIntVar(0, num_days * 16, f"total_hours_{s_idx}") for s_idx in range(staff_count)]
     hours_list = [0] * len(works)
     for name, id in works.items():
@@ -139,7 +125,6 @@ def create_shift_schedule(year, month, staff_names, holiday_requests, work_reque
         model.AddAbsEquality(abs_deviations[s_idx], deviation)
     model.Add(total_deviation == sum(abs_deviations))
 
-    # C6: 当直回数の公平性
     duty_counts = [model.NewIntVar(0, num_days, f"duty_{s_idx}") for s_idx in range(staff_count)]
     for s_idx in range(staff_count):
         is_duty_bools = [model.NewBoolVar(f's{s_idx}_d{d_idx}_is_duty_count') for d_idx in range(num_days)]
@@ -166,7 +151,7 @@ def create_shift_schedule(year, month, staff_names, holiday_requests, work_reque
             schedule[s_name] = [works_inv_symbols[solver.Value(shifts[(s_idx, d_idx)])] for d_idx in range(num_days)]
         df = pd.DataFrame(schedule).T
         weekdays_jp = ["月", "火", "水", "木", "金", "土", "日"]
-        df.columns = [f"{date.day} ({weekdays_jp[date.weekday()]})" for date in dates]
+        df.columns = [f"{date.day} {weekdays_jp[date.weekday()]}" for date in dates]
         return df, "success"
     else:
         return None, "failed"
@@ -248,13 +233,12 @@ with col1:
 with col2:
     fixed_day = st.selectbox("日付を選択", options=all_days, key="fix_day", index=None, placeholder="日を選択...")
 with col3:
-    # ▼▼▼【修正点】選択肢を表示記号に変更 ▼▼▼
     fixed_work = st.selectbox("勤務を選択", options=["", "半", "△", "▲"], key="fix_work", index=None, placeholder="勤務を選択...")
 with col4:
     st.write("") 
     st.write("")
     if st.button("追加", key="add_fix"):
-        if fixed_name and fixed_day and fixed_work is not None: # 空白""も許可
+        if fixed_name and fixed_day and fixed_work is not None:
             new_fix = {'staff': fixed_name, 'day': fixed_day, 'work': fixed_work}
             if new_fix not in st.session_state.fixed_shifts:
                 st.session_state.fixed_shifts.append(new_fix)
@@ -285,26 +269,42 @@ if st.button("🚀 シフトを作成する", type="primary"):
         else:
             st.session_state.schedule_df = None
             st.error("❌ シフトの作成に失敗しました。条件が厳しすぎる可能性があります。")
-if st.session_state.schedule_df is not None:
-    st.success("✅ シフト表が表示されました。下の表のセルは直接編集できます。")
-    edited_df = st.data_editor(st.session_state.schedule_df, key="shift_editor")
-    st.session_state.schedule_df = edited_df
-    
-    st.subheader("サマリー（手直し後）")
-    summary_df = pd.DataFrame(index=edited_df.index)
-    
-    # ▼▼▼【修正点】サマリー計算を新しい記号に対応 ▼▼▼
-    summary_work_hours = {"": 8, "半": 4, "△": 16, "▲": 0, "ヤ": 0}
-    summary_df['総労働時間'] = edited_df.apply(lambda row: sum(summary_work_hours.get(shift, 0) for shift in row), axis=1)
-    summary_df['勤務日数'] = edited_df.apply(lambda row: sum(1 for shift in row if shift != "ヤ"), axis=1)
-    summary_df['当直回数'] = edited_df.apply(lambda row: (row == '△').sum(), axis=1)
-    st.dataframe(summary_df[['総労働時間', '勤務日数', '当直回数']])
-    # ▲▲▲ 修正完了 ▲▲▲
 
-    csv = edited_df.to_csv(index=True, encoding='utf-8-sig').encode('utf-8-sig')
+if st.session_state.schedule_df is not None:
+    st.success("✅ シフトの作成に成功しました！")
+    
+    # ▼▼▼【ここからが修正部分です】▼▼▼
+    df_for_display = st.session_state.schedule_df.copy()
+    
+    # ヘッダーを2行にするため、列名を改行文字(\n)入りに変更
+    weekdays_jp = ["月", "火", "水", "木", "金", "土", "日"]
+    new_columns = []
+    for day_str in df_for_display.columns:
+        day_num = day_str.split(' ')[0]
+        day_of_week = day_str.split(' ')[1]
+        new_columns.append(f"{day_num}\n{day_of_week}")
+    df_for_display.columns = new_columns
+    
+    # Pandas Styler を使って中央ぞろえとヘッダーの改行を適用
+    styler = df_for_display.style.set_properties(**{'text-align': 'center'}).set_table_styles(
+        [{'selector': 'th.col_heading', 'props': 'white-space: pre-wrap;'}]
+    )
+    st.dataframe(styler)
+    
+    st.subheader("サマリー")
+    summary_df = pd.DataFrame(index=st.session_state.schedule_df.index)
+    
+    summary_work_hours = {"": 8, "半": 4, "△": 16, "▲": 0, "ヤ": 0}
+    summary_df['総労働時間'] = st.session_state.schedule_df.apply(lambda row: sum(summary_work_hours.get(shift, 0) for shift in row), axis=1)
+    summary_df['勤務日数'] = st.session_state.schedule_df.apply(lambda row: sum(1 for shift in row if shift != "ヤ"), axis=1)
+    summary_df['当直回数'] = st.session_state.schedule_df.apply(lambda row: (row == '△').sum(), axis=1)
+    st.dataframe(summary_df[['総労働時間', '勤務日数', '当直回数']])
+
+    csv = st.session_state.schedule_df.to_csv(index=True, encoding='utf-8-sig').encode('utf-8-sig')
     st.download_button(
-        label="📄 編集後のシフト表をダウンロード",
+        label="📄 CSVファイルをダウンロード",
         data=csv,
-        file_name=f"shift_{year}_{month}_edited.csv",
+        file_name=f"shift_{year}_{month}.csv",
         mime="text/csv",
     )
+    # ▲▲▲ 修正完了 ▲▲▲
