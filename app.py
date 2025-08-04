@@ -42,15 +42,10 @@ def create_shift_schedule(year, month, staff_names, holiday_requests, work_reque
             model.Add(shifts[(s_idx, d_idx)] != works["当直"]).OnlyEnforceIf(is_on_duty[s_idx].Not())
         model.Add(sum(is_on_duty) == 1)
         
-        # ▼▼▼【ここからが修正部分です】▼▼▼
-        # 日曜日の場合、勤務を「当直」「明け」「公休」に厳格に限定する
-        if date.weekday() == 6: # 6 = Sunday
+        if date.weekday() == 6: # Sunday
             for s_idx in range(staff_count):
                 allowed_shifts = [works["当直"], works["明け"], works["公休"]]
-                # AddAllowedAssignments を使って、許可された勤務のリストを直接指定
                 model.AddAllowedAssignments([shifts[(s_idx, d_idx)]], [(s,) for s in allowed_shifts])
-        
-        # 日曜日以外の場合、UIで設定された日勤人数ルールを適用
         else:
             required_nikkin = nikkin_requirements[date.weekday()]
             if required_nikkin > 0:
@@ -59,11 +54,9 @@ def create_shift_schedule(year, month, staff_names, holiday_requests, work_reque
                     model.Add(shifts[(s_idx, d_idx)] == works["日勤"]).OnlyEnforceIf(is_on_nikkin[s_idx])
                     model.Add(shifts[(s_idx, d_idx)] != works["日勤"]).OnlyEnforceIf(is_on_nikkin[s_idx].Not())
                 model.Add(sum(is_on_nikkin) == required_nikkin)
-        # ▲▲▲ 修正完了 ▲▲▲
 
     # C2: 当直→明け→公休ルール
     for s_idx in range(staff_count):
-        model.Add(shifts[(s_idx, 0)] != works["明け"])
         for d_idx in range(num_days):
             is_duty_today = model.NewBoolVar(f's{s_idx}_d{d_idx}_is_duty_c2')
             model.Add(shifts[(s_idx, d_idx)] == works["当直"]).OnlyEnforceIf(is_duty_today)
@@ -116,7 +109,7 @@ def create_shift_schedule(year, month, staff_names, holiday_requests, work_reque
             if work_id is not None:
                 model.Add(shifts[(s_idx, d_idx)] == work_id)
 
-    # C5: 総労働時間を目標値に近づける
+    # C5: 総労働時間
     total_hours_per_staff = [model.NewIntVar(0, num_days * 16, f"total_hours_{s_idx}") for s_idx in range(staff_count)]
     hours_list = [0] * len(works)
     for name, id in works.items():
@@ -126,14 +119,37 @@ def create_shift_schedule(year, month, staff_names, holiday_requests, work_reque
         for d_idx in range(num_days):
             model.AddElement(shifts[(s_idx, d_idx)], hours_list, daily_hour_vars[d_idx])
         model.Add(total_hours_per_staff[s_idx] == sum(daily_hour_vars))
+
+    # ▼▼▼【ここからが修正部分です】▼▼▼
+    # C6: 最適化の目標設定
+    
+    # 目標1: 労働時間を目標値に近づける
     total_deviation = model.NewIntVar(0, staff_count * num_days * 16, 'total_deviation')
-    deviations = [model.NewIntVar(-num_days * 16, num_days * 16, f'dev_{s_idx}') for s_idx in range(staff_count)]
     abs_deviations = [model.NewIntVar(0, num_days * 16, f'abs_dev_{s_idx}') for s_idx in range(staff_count)]
     for s_idx in range(staff_count):
-        model.Add(deviations[s_idx] == total_hours_per_staff[s_idx] - target_hours)
-        model.AddAbsEquality(abs_deviations[s_idx], deviations[s_idx])
+        deviation = model.NewIntVar(-num_days * 16, num_days * 16, f'dev_{s_idx}')
+        model.Add(deviation == total_hours_per_staff[s_idx] - target_hours)
+        model.AddAbsEquality(abs_deviations[s_idx], deviation)
     model.Add(total_deviation == sum(abs_deviations))
-    model.Minimize(total_deviation)
+
+    # 目標2: 当直回数を公平にする
+    duty_counts = [model.NewIntVar(0, num_days, f"duty_{s_idx}") for s_idx in range(staff_count)]
+    for s_idx in range(staff_count):
+        is_duty_bools = [model.NewBoolVar(f's{s_idx}_d{d_idx}_is_duty_count') for d_idx in range(num_days)]
+        for d_idx in range(num_days):
+            model.Add(shifts[(s_idx, d_idx)] == works["当直"]).OnlyEnforceIf(is_duty_bools[d_idx])
+            model.Add(shifts[(s_idx, d_idx)] != works["当直"]).OnlyEnforceIf(is_duty_bools[d_idx].Not())
+        model.Add(duty_counts[s_idx] == sum(is_duty_bools))
+    
+    min_duty, max_duty = model.NewIntVar(0, 10, 'min_d'), model.NewIntVar(0, 10, 'max_d')
+    model.AddMinEquality(min_duty, duty_counts)
+    model.AddMaxEquality(max_duty, duty_counts)
+    duty_difference = model.NewIntVar(0, 10, 'duty_diff')
+    model.Add(duty_difference == max_duty - min_duty)
+
+    # 2つの目標を合算して最小化する（当直回数の公平性を10倍重視）
+    model.Minimize(total_deviation + (duty_difference * 10))
+    # ▲▲▲ 修正完了 ▲▲▲
 
     solver = cp_model.CpSolver()
     solver.parameters.max_time_in_seconds = 30.0
@@ -185,17 +201,13 @@ cols = st.columns(7)
 nikkin_requirements = []
 for i, day in enumerate(weekdays):
     with cols[i]:
-        # ▼▼▼【修正点】日曜日の入力欄をロック ▼▼▼
         is_sunday = (i == 6)
         default_val = 1 if i == 4 else 0 if i >= 5 else 2
         saved_nikkin_count = get_state(f'nikkin_{i}', default_val)
-        
         if is_sunday:
-            # 日曜日は常に0人で固定し、操作不可にする
             nikkin_requirements.append(st.number_input(day, min_value=0, max_value=0, value=0, key=f"nikkin_{i}", disabled=True, help="日曜日の日勤はルールで0人に固定されています。"))
         else:
             nikkin_requirements.append(st.number_input(day, min_value=0, max_value=staff_count, value=int(saved_nikkin_count), key=f"nikkin_{i}"))
-        # ▲▲▲ 修正完了 ▲▲▲
         
 if saved_staff_count != staff_count:
     localS.setItem('staff_count', staff_count)
@@ -204,7 +216,6 @@ for i, name in enumerate(staff_names):
     if saved_name != name:
         localS.setItem(f'staff_name_{i}', name)
 for i in range(7):
-    # 日曜日の設定は保存しない（常に0なので）
     if i != 6:
         default_val = 1 if i == 4 else 0 if i >= 5 else 2
         saved_nikkin_count = get_state(f'nikkin_{i}', default_val)
