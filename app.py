@@ -11,8 +11,6 @@ def create_shift_schedule(year, month, staff_names, holiday_requests, work_reque
     staff_count = len(staff_names)
     works = {"公休": 0, "日勤": 1, "半日": 2, "当直": 3, "明け": 4}
     works_inv = {v: k for k, v in works.items()}
-    
-    # ▼▼▼【修正点】勤務ごとの労働時間を定義 ▼▼▼
     work_hours = {"日勤": 8, "半日": 4, "当直": 16, "明け": 0, "公休": 0}
     
     try:
@@ -20,6 +18,13 @@ def create_shift_schedule(year, month, staff_names, holiday_requests, work_reque
     except calendar.IllegalMonthError:
         st.error("有効な月を入力してください（1-12）。")
         return None, None
+
+    # ▼▼▼【修正点】目標労働時間を設定 ▼▼▼
+    if num_days == 31:
+        target_hours = 168
+    else:
+        target_hours = 160
+    # ▲▲▲ 修正完了 ▲▲▲
 
     dates = [pd.Timestamp(f"{year}-{month}-{d}") for d in range(1, num_days + 1)]
     holidays = [d[0].day for d in jpholiday.month_holidays(year, month)]
@@ -102,9 +107,7 @@ def create_shift_schedule(year, month, staff_names, holiday_requests, work_reque
             if work_id is not None:
                 model.Add(shifts[(s_idx, d_idx)] == work_id)
 
-    # ▼▼▼【修正点】C5: 総勤務「日数」ルールを廃止し、C6で総労働「時間」を均等化 ▼▼▼
-    
-    # C6: 総労働時間の均等化
+    # ▼▼▼【修正点】C5: 総労働時間を目標値に近づける ▼▼▼
     total_hours_per_staff = [model.NewIntVar(0, num_days * 16, f"total_hours_{s_idx}") for s_idx in range(staff_count)]
     hours_list = [0] * len(works)
     for name, id in works.items():
@@ -116,10 +119,17 @@ def create_shift_schedule(year, month, staff_names, holiday_requests, work_reque
             model.AddElement(shifts[(s_idx, d_idx)], hours_list, daily_hour_vars[d_idx])
         model.Add(total_hours_per_staff[s_idx] == sum(daily_hour_vars))
 
-    min_hours, max_hours = model.NewIntVar(0, num_days * 16, 'min_h'), model.NewIntVar(0, num_days * 16, 'max_h')
-    model.AddMinEquality(min_hours, total_hours_per_staff)
-    model.AddMaxEquality(max_hours, total_hours_per_staff)
-    model.Minimize(max_hours - min_hours) # 全員の総労働時間の差を最小化する
+    # 目標時間との差（の絶対値）の合計を最小化する
+    total_deviation = model.NewIntVar(0, staff_count * num_days * 16, 'total_deviation')
+    deviations = [model.NewIntVar(-num_days * 16, num_days * 16, f'dev_{s_idx}') for s_idx in range(staff_count)]
+    abs_deviations = [model.NewIntVar(0, num_days * 16, f'abs_dev_{s_idx}') for s_idx in range(staff_count)]
+
+    for s_idx in range(staff_count):
+        model.Add(deviations[s_idx] == total_hours_per_staff[s_idx] - target_hours)
+        model.AddAbsEquality(abs_deviations[s_idx], deviations[s_idx])
+
+    model.Add(total_deviation == sum(abs_deviations))
+    model.Minimize(total_deviation)
     # ▲▲▲ 修正完了 ▲▲▲
 
     solver = cp_model.CpSolver()
@@ -146,7 +156,6 @@ localS = LocalStorage()
 def get_state(key, default_value):
     return localS.getItem(key) or default_value
 
-# --- 入力セクション ---
 st.header("1. 基本設定")
 col1, col2, col3 = st.columns(3)
 with col1:
@@ -253,13 +262,11 @@ if st.session_state.schedule_df is not None:
     st.subheader("サマリー（手直し後）")
     summary_df = pd.DataFrame(index=edited_df.index)
     
-    # ▼▼▼【修正点】サマリーに総労働時間を追加 ▼▼▼
     work_hours_summary = {"日勤": 8, "半日": 4, "当直": 16, "明け": 0, "公休": 0}
     summary_df['総労働時間'] = edited_df.apply(lambda row: sum(work_hours_summary.get(shift, 0) for shift in row), axis=1)
     summary_df['勤務日数'] = edited_df.apply(lambda row: (row != '公休').sum(), axis=1)
     summary_df['当直回数'] = edited_df.apply(lambda row: (row == '当直').sum(), axis=1)
     st.dataframe(summary_df[['総労働時間', '勤務日数', '当直回数']])
-    # ▲▲▲ 修正完了 ▲▲▲
 
     csv = edited_df.to_csv(index=True, encoding='utf-8-sig').encode('utf-8-sig')
     st.download_button(
