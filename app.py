@@ -7,7 +7,7 @@ from datetime import datetime
 from streamlit_local_storage import LocalStorage
 
 # --- シフト作成のコアロジック（関数として定義） ---
-def create_shift_schedule(year, month, staff_names, holiday_requests, work_requests, nikkin_requirements, fixed_shifts):
+def create_shift_schedule(year, month, staff_names, holiday_requests, work_requests, nikkin_requirements, fixed_shifts, fairness_weight):
     staff_count = len(staff_names)
     works = {"公休": 0, "日勤": 1, "半日": 2, "当直": 3, "明け": 4}
     work_symbols = {"公休": "ヤ", "日勤": "", "半日": "半", "当直": "△", "明け": "▲"}
@@ -140,7 +140,9 @@ def create_shift_schedule(year, month, staff_names, holiday_requests, work_reque
     duty_difference = model.NewIntVar(0, 10, 'duty_diff')
     model.Add(duty_difference == max_duty - min_duty)
 
-    model.Minimize(total_deviation + (duty_difference * 10))
+    # ▼▼▼【修正点】バランス調整用の重みを最適化目標に追加 ▼▼▼
+    model.Minimize(total_deviation + (duty_difference * fairness_weight))
+    # ▲▲▲ 修正完了 ▲▲▲
 
     solver = cp_model.CpSolver()
     solver.parameters.max_time_in_seconds = 30.0
@@ -190,10 +192,9 @@ cols = st.columns(7)
 nikkin_requirements = []
 for i, day in enumerate(weekdays):
     with cols[i]:
-        is_holiday_weekday = (i >= 5) # 土日の場合
+        is_holiday_weekday = (i >= 5)
         default_val = 1 if i == 4 else 0 if is_holiday_weekday else 2
         saved_nikkin_count = get_state(f'nikkin_{i}', default_val)
-        
         if is_holiday_weekday:
             nikkin_requirements.append(st.number_input(day, min_value=0, max_value=0, value=0, key=f"nikkin_{i}", disabled=True, help="土日・祝日の日勤は0人に固定されています。"))
         else:
@@ -206,11 +207,20 @@ for i, name in enumerate(staff_names):
     if saved_name != name:
         localS.setItem(f'staff_name_{i}', name)
 for i in range(7):
-    if i < 5: # 平日のみ保存
+    if i < 5:
         default_val = 1 if i == 4 else 2
         saved_nikkin_count = get_state(f'nikkin_{i}', default_val)
         if saved_nikkin_count != nikkin_requirements[i]:
             localS.setItem(f'nikkin_{i}', nikkin_requirements[i])
+
+# ▼▼▼【ここからが追加部分です】▼▼▼
+with st.expander("⚙️ 高度な設定: 最適化のバランス調整"):
+    fairness_weight = st.slider(
+        "「労働時間の正確さ」と「当直回数の公平さ」のバランス",
+        min_value=0, max_value=20, value=8,
+        help="数値を小さくすると総労働時間が目標値に近づくことを優先します。数値を大きくすると当直回数を厳密に揃えることを優先します。デフォルトは8です。"
+    )
+# ▲▲▲ 追加完了 ▲▲▲
 
 st.header("4. スタッフごとの希望")
 holiday_requests = {}
@@ -263,7 +273,7 @@ if st.button("🚀 シフトを作成する", type="primary"):
         st.session_state.schedule_df = None
     else:
         with st.spinner("最適なシフトを計算中です..."):
-            df, status = create_shift_schedule(year, month, staff_names, holiday_requests, work_requests, nikkin_requirements, st.session_state.fixed_shifts)
+            df, status = create_shift_schedule(year, month, staff_names, holiday_requests, work_requests, nikkin_requirements, st.session_state.fixed_shifts, fairness_weight)
         if status == "success":
             st.session_state.schedule_df = df
         else:
@@ -277,19 +287,16 @@ if st.session_state.schedule_df is not None:
     
     weekdays_jp = ["月", "火", "水", "木", "金", "土", "日"]
     dates_for_header = [pd.Timestamp(f"{year}-{month}-{d}") for d in range(1, calendar.monthrange(year, month)[1] + 1)]
+    holidays_for_header = [d[0].day for d in jpholiday.month_holidays(year, month)]
     
     header_tuples = []
     for date in dates_for_header:
         header_tuples.append((str(date.day), weekdays_jp[date.weekday()]))
     df_for_display.columns = pd.MultiIndex.from_tuples(header_tuples)
 
-    # ▼▼▼【ここからが修正部分です】▼▼▼
-    # 背景色を付けるスタイルを削除し、中央ぞろえのスタイルのみを適用
     styler = df_for_display.style.set_properties(**{'text-align': 'center'}).set_table_styles(
         [{'selector': 'th.col_heading', 'props': 'white-space: pre-wrap;'}]
     )
-    # ▲▲▲ 修正完了 ▲▲▲
-    
     st.dataframe(styler)
     
     st.subheader("サマリー")
