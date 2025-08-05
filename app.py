@@ -7,7 +7,7 @@ from datetime import datetime
 from streamlit_local_storage import LocalStorage
 
 # --- シフト作成のコアロジック（関数として定義） ---
-def create_shift_schedule(year, month, staff_names, holiday_requests, work_requests, nikkin_requirements, fixed_shifts, fairness_weight, max_half_days):
+def create_shift_schedule(year, month, staff_names, holiday_requests, work_requests, nikkin_requirements, fixed_shifts, max_half_days):
     staff_count = len(staff_names)
     works = {"公休": 0, "日勤": 1, "半日": 2, "当直": 3, "明け": 4}
     work_symbols = {"公休": "ヤ", "日勤": "", "半日": "半", "当直": "△", "明け": "▲"}
@@ -108,16 +108,15 @@ def create_shift_schedule(year, month, staff_names, holiday_requests, work_reque
             if work_id is not None:
                 model.Add(shifts[(s_idx, d_idx)] == work_id)
     
-    # ▼▼▼【ここからが追加部分です】▼▼▼
-    # C4.5: 半日勤務回数の上限
     for s_idx in range(staff_count):
         is_half_day_bools = [model.NewBoolVar(f's{s_idx}_d{d_idx}_is_half') for d_idx in range(num_days)]
         for d_idx in range(num_days):
             model.Add(shifts[(s_idx, d_idx)] == works["半日"]).OnlyEnforceIf(is_half_day_bools[d_idx])
             model.Add(shifts[(s_idx, d_idx)] != works["半日"]).OnlyEnforceIf(is_half_day_bools[d_idx].Not())
         model.Add(sum(is_half_day_bools) <= max_half_days)
-    # ▲▲▲ 追加完了 ▲▲▲
 
+    # ▼▼▼【ここからが修正部分です】▼▼▼
+    # C5: 総労働時間を厳格なルールとして設定
     total_hours_per_staff = [model.NewIntVar(0, num_days * 16, f"total_hours_{s_idx}") for s_idx in range(staff_count)]
     hours_list = [0] * len(works)
     for name, id in works.items():
@@ -127,15 +126,10 @@ def create_shift_schedule(year, month, staff_names, holiday_requests, work_reque
         for d_idx in range(num_days):
             model.AddElement(shifts[(s_idx, d_idx)], hours_list, daily_hour_vars[d_idx])
         model.Add(total_hours_per_staff[s_idx] == sum(daily_hour_vars))
-    
-    total_deviation = model.NewIntVar(0, staff_count * num_days * 16, 'total_deviation')
-    abs_deviations = [model.NewIntVar(0, num_days * 16, f'abs_dev_{s_idx}') for s_idx in range(staff_count)]
-    for s_idx in range(staff_count):
-        deviation = model.NewIntVar(-num_days * 16, num_days * 16, f'dev_{s_idx}')
-        model.Add(deviation == total_hours_per_staff[s_idx] - target_hours)
-        model.AddAbsEquality(abs_deviations[s_idx], deviation)
-    model.Add(total_deviation == sum(abs_deviations))
+        # 総労働時間を目標値に完全に一致させる
+        model.Add(total_hours_per_staff[s_idx] == target_hours)
 
+    # C6: 最適化目標を「当直回数の公平化」のみにする
     duty_counts = [model.NewIntVar(0, num_days, f"duty_{s_idx}") for s_idx in range(staff_count)]
     for s_idx in range(staff_count):
         is_duty_bools = [model.NewBoolVar(f's{s_idx}_d{d_idx}_is_duty_count') for d_idx in range(num_days)]
@@ -150,7 +144,8 @@ def create_shift_schedule(year, month, staff_names, holiday_requests, work_reque
     duty_difference = model.NewIntVar(0, 10, 'duty_diff')
     model.Add(duty_difference == max_duty - min_duty)
 
-    model.Minimize(total_deviation + (duty_difference * fairness_weight))
+    model.Minimize(duty_difference)
+    # ▲▲▲ 修正完了 ▲▲▲
 
     solver = cp_model.CpSolver()
     solver.parameters.max_time_in_seconds = 30.0
@@ -221,19 +216,14 @@ for i in range(7):
         if saved_nikkin_count != nikkin_requirements[i]:
             localS.setItem(f'nikkin_{i}', nikkin_requirements[i])
 
-with st.expander("⚙️ 高度な設定: 最適化のバランス調整"):
-    fairness_weight = st.slider(
-        "「労働時間の正確さ」と「当直回数の公平さ」のバランス",
-        min_value=0, max_value=20, value=8,
-        help="数値を小さくすると総労働時間が目標値に近づくことを優先します。数値を大きくすると当直回数を厳密に揃えることを優先します。デフォルトは8です。"
-    )
-    # ▼▼▼【ここからが追加部分です】▼▼▼
+# ▼▼▼【修正点】バランス調整スライダーを削除し、半日勤務スライダーのみにする ▼▼▼
+with st.expander("⚙️ 高度な設定"):
     max_half_days = st.slider(
         "各スタッフの半日勤務の上限回数",
-        min_value=2, max_value=4, value=2,
-        help="1人あたりの月間半日勤務の最大回数を設定します。通常は2回、状況に応じて4回まで増やせます。"
+        min_value=0, max_value=4, value=2,
+        help="1人あたりの月間半日勤務の最大回数。労働時間を厳密に調整するために使われます。通常は0-2回、状況に応じて4回まで増やせます。"
     )
-    # ▲▲▲ 追加完了 ▲▲▲
+# ▲▲▲ 修正完了 ▲▲▲
 
 st.header("4. スタッフごとの希望")
 holiday_requests = {}
@@ -286,7 +276,7 @@ if st.button("🚀 シフトを作成する", type="primary"):
         st.session_state.schedule_df = None
     else:
         with st.spinner("最適なシフトを計算中です..."):
-            df, status = create_shift_schedule(year, month, staff_names, holiday_requests, work_requests, nikkin_requirements, st.session_state.fixed_shifts, fairness_weight, max_half_days)
+            df, status = create_shift_schedule(year, month, staff_names, holiday_requests, work_requests, nikkin_requirements, st.session_state.fixed_shifts, max_half_days)
         if status == "success":
             st.session_state.schedule_df = df
         else:
