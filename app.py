@@ -5,6 +5,47 @@ from ortools.sat.python import cp_model
 import calendar
 from datetime import datetime
 from streamlit_local_storage import LocalStorage
+from collections import defaultdict
+
+# ▼▼▼【ここからが追加部分です】▼▼▼
+# --- 事前チェック機能 ---
+def pre_check_constraints(staff_names, holiday_requests, work_requests, fixed_shifts):
+    work_symbols = {"公休": "ヤ", "日勤": "", "半日": "半", "当直": "△", "明け": "▲"}
+    
+    # 矛盾チェック1: 個人の希望休と出勤希望の重複
+    for name in staff_names:
+        holiday_set = set(holiday_requests.get(name, []))
+        work_set = set(work_requests.get(name, []))
+        if not holiday_set.isdisjoint(work_set):
+            day = holiday_set.intersection(work_set).pop()
+            return f"❌ **{name}さん**の希望休（{day}日）と出勤希望（{day}日）が重複しています。"
+
+    # 矛盾チェック2: 固定シフトと希望の重複
+    for fix in fixed_shifts:
+        name = fix['staff']
+        day = fix['day']
+        work_symbol = fix['work']
+        display_work = "日勤" if work_symbol == "" else work_symbol
+        
+        if day in holiday_requests.get(name, []):
+            return f"❌ **{name}さん**の固定シフト（{day}日：{display_work}）と希望休（{day}日）が重複しています。"
+        
+        work_name = next((w_name for w_name, sym in work_symbols.items() if sym == work_symbol), None)
+        if work_name == "公休" and day in work_requests.get(name, []):
+            return f"❌ **{name}さん**の固定シフト（{day}日：公休）と出勤希望（{day}日）が重複しています。"
+
+    # 矛盾チェック3: 固定シフト間のルール違反
+    fixed_duty_counts = defaultdict(int)
+    for fix in fixed_shifts:
+        if fix['work'] == "△": # 当直
+            fixed_duty_counts[fix['day']] += 1
+    
+    for day, count in fixed_duty_counts.items():
+        if count > 1:
+            return f"❌ **{day}日**の当直に{count}人が固定されています。当直は1日1人までです。"
+            
+    return None # 矛盾がない場合は None を返す
+# ▲▲▲ 追加完了 ▲▲▲
 
 # --- シフト作成のコアロジック（関数として定義） ---
 def create_shift_schedule(year, month, staff_names, holiday_requests, work_requests, nikkin_requirements, fixed_shifts, fairness_weight, max_half_days):
@@ -115,8 +156,6 @@ def create_shift_schedule(year, month, staff_names, holiday_requests, work_reque
             model.Add(shifts[(s_idx, d_idx)] != works["半日"]).OnlyEnforceIf(is_half_day_bools[d_idx].Not())
         model.Add(sum(is_half_day_bools) <= max_half_days)
 
-    # ▼▼▼【ここからが修正部分です】▼▼▼
-    # C5: 総労働時間
     total_hours_per_staff = [model.NewIntVar(0, num_days * 16, f"total_hours_{s_idx}") for s_idx in range(staff_count)]
     hours_list = [0] * len(works)
     for name, id in works.items():
@@ -127,13 +166,10 @@ def create_shift_schedule(year, month, staff_names, holiday_requests, work_reque
             model.AddElement(shifts[(s_idx, d_idx)], hours_list, daily_hour_vars[d_idx])
         model.Add(total_hours_per_staff[s_idx] == sum(daily_hour_vars))
         
-        # 労働時間を目標±8時間の範囲に収める（ハードな制約）
         tolerance = 8
         model.Add(total_hours_per_staff[s_idx] >= target_hours - tolerance)
         model.Add(total_hours_per_staff[s_idx] <= target_hours + tolerance)
-
-    # C6: 最適化の目標設定
-    # 目標1: 労働時間を目標値に近づける（ソフトな目標）
+    
     total_deviation = model.NewIntVar(0, staff_count * tolerance, 'total_deviation')
     abs_deviations = [model.NewIntVar(0, tolerance, f'abs_dev_{s_idx}') for s_idx in range(staff_count)]
     for s_idx in range(staff_count):
@@ -142,7 +178,6 @@ def create_shift_schedule(year, month, staff_names, holiday_requests, work_reque
         model.AddAbsEquality(abs_deviations[s_idx], deviation)
     model.Add(total_deviation == sum(abs_deviations))
 
-    # 目標2: 当直回数を公平にする
     duty_counts = [model.NewIntVar(0, num_days, f"duty_{s_idx}") for s_idx in range(staff_count)]
     for s_idx in range(staff_count):
         is_duty_bools = [model.NewBoolVar(f's{s_idx}_d{d_idx}_is_duty_count') for d_idx in range(num_days)]
@@ -157,9 +192,7 @@ def create_shift_schedule(year, month, staff_names, holiday_requests, work_reque
     duty_difference = model.NewIntVar(0, 10, 'duty_diff')
     model.Add(duty_difference == max_duty - min_duty)
 
-    # 2つの目標を合算して最小化する
     model.Minimize(total_deviation + (duty_difference * fairness_weight))
-    # ▲▲▲ 修正完了 ▲▲▲
 
     solver = cp_model.CpSolver()
     solver.parameters.max_time_in_seconds = 30.0
@@ -230,7 +263,6 @@ for i in range(7):
         if saved_nikkin_count != nikkin_requirements[i]:
             localS.setItem(f'nikkin_{i}', nikkin_requirements[i])
 
-# ▼▼▼【修正点】バランス調整スライダーを復活 ▼▼▼
 with st.expander("⚙️ 高度な設定"):
     fairness_weight = st.slider(
         "「労働時間の正確さ」と「当直回数の公平さ」のバランス",
@@ -242,7 +274,6 @@ with st.expander("⚙️ 高度な設定"):
         min_value=0, max_value=4, value=2,
         help="1人あたりの月間半日勤務の最大回数。労働時間を調整するために使われます。"
     )
-# ▲▲▲ 修正完了 ▲▲▲
 
 st.header("4. スタッフごとの希望")
 holiday_requests = {}
