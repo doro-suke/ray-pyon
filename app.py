@@ -53,6 +53,10 @@ def create_shift_schedule(year, month, staff_names, holiday_requests, work_reque
         target_hours = 168
     else:
         target_hours = 160
+    
+    # ▼▼▼【修正点】公休の日数を10日に固定 ▼▼▼
+    num_holidays = 10
+    # ▲▲▲ 修正完了 ▲▲▲
 
     dates = [pd.Timestamp(f"{year}-{month}-{d}") for d in range(1, num_days + 1)]
     holidays = [d[0].day for d in jpholiday.month_holidays(year, month)]
@@ -144,29 +148,23 @@ def create_shift_schedule(year, month, staff_names, holiday_requests, work_reque
             model.Add(shifts[(s_idx, d_idx)] != works["半日"]).OnlyEnforceIf(is_half_day_bools[d_idx].Not())
         model.Add(sum(is_half_day_bools) <= max_half_days)
 
-    # ▼▼▼【ここからが修正部分です】▼▼▼
-    # C5: 総労働時間
     total_hours_per_staff = [model.NewIntVar(0, num_days * 16, f"total_hours_{s_idx}") for s_idx in range(staff_count)]
     hours_list = [0] * len(works)
     for name, id in works.items():
         hours_list[id] = work_hours.get(name, 0)
     for s_idx in range(staff_count):
+        is_holiday_bools = [model.NewBoolVar(f's{s_idx}_d{d_idx}_is_holiday') for d_idx in range(num_days)]
+        for d_idx in range(num_days):
+            model.Add(shifts[(s_idx, d_idx)] == works["公休"]).OnlyEnforceIf(is_holiday_bools[d_idx])
+            model.Add(shifts[(s_idx, d_idx)] != works["公休"]).OnlyEnforceIf(is_holiday_bools[d_idx].Not())
+        model.Add(sum(is_holiday_bools) == num_holidays)
+
         daily_hour_vars = [model.NewIntVar(0, 16, f's{s_idx}_d{d_idx}_hours') for d_idx in range(num_days)]
         for d_idx in range(num_days):
             model.AddElement(shifts[(s_idx, d_idx)], hours_list, daily_hour_vars[d_idx])
         model.Add(total_hours_per_staff[s_idx] == sum(daily_hour_vars))
-    
-    # C6: 最適化の目標設定
-    # 目標1: 労働時間を目標値に近づける（ソフトな目標）
-    total_deviation = model.NewIntVar(0, staff_count * num_days * 16, 'total_deviation')
-    abs_deviations = [model.NewIntVar(0, num_days * 16, f'abs_dev_{s_idx}') for s_idx in range(staff_count)]
-    for s_idx in range(staff_count):
-        deviation = model.NewIntVar(-num_days * 16, num_days * 16, f'dev_{s_idx}')
-        model.Add(deviation == total_hours_per_staff[s_idx] - target_hours)
-        model.AddAbsEquality(abs_deviations[s_idx], deviation)
-    model.Add(total_deviation == sum(abs_deviations))
+        model.Add(total_hours_per_staff[s_idx] == target_hours)
 
-    # 目標2: 当直回数を公平にする
     duty_counts = [model.NewIntVar(0, num_days, f"duty_{s_idx}") for s_idx in range(staff_count)]
     for s_idx in range(staff_count):
         is_duty_bools = [model.NewBoolVar(f's{s_idx}_d{d_idx}_is_duty_count') for d_idx in range(num_days)]
@@ -181,9 +179,7 @@ def create_shift_schedule(year, month, staff_names, holiday_requests, work_reque
     duty_difference = model.NewIntVar(0, 10, 'duty_diff')
     model.Add(duty_difference == max_duty - min_duty)
 
-    # 労働時間の一致を当直の公平性より10倍重視する
-    model.Minimize((total_deviation * 10) + duty_difference)
-    # ▲▲▲ 修正完了 ▲▲▲
+    model.Minimize(duty_difference)
 
     solver = cp_model.CpSolver()
     solver.parameters.max_time_in_seconds = 30.0
@@ -254,14 +250,12 @@ for i in range(7):
         if saved_nikkin_count != nikkin_requirements[i]:
             localS.setItem(f'nikkin_{i}', nikkin_requirements[i])
 
-# ▼▼▼【修正点】バランス調整スライダーを削除 ▼▼▼
 with st.expander("⚙️ 高度な設定"):
     max_half_days = st.slider(
         "各スタッフの半日勤務の上限回数",
         min_value=0, max_value=4, value=2,
-        help="1人あたりの月間半日勤務の最大回数。労働時間を調整するために使われます。"
+        help="1人あたりの月間半日勤務の最大回数。労働時間を厳密に調整するために使われます。"
     )
-# ▲▲▲ 修正完了 ▲▲▲
 
 st.header("4. スタッフごとの希望")
 holiday_requests = {}
