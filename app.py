@@ -42,10 +42,15 @@ def create_shift_schedule(year, month, staff_names, holiday_requests, work_reque
             model.Add(shifts[(s_idx, d_idx)] != works["当直"]).OnlyEnforceIf(is_on_duty[s_idx].Not())
         model.Add(sum(is_on_duty) == 1)
         
-        if date.weekday() == 6: # Sunday
+        # ▼▼▼【ここからが修正部分です】▼▼▼
+        # 日曜日または祝日の場合、勤務を「当直」「明け」「公休」に厳格に限定する
+        is_holiday_or_sunday = (date.weekday() == 6) or (date.day in holidays)
+        if is_holiday_or_sunday:
             for s_idx in range(staff_count):
                 allowed_shifts = [works["当直"], works["明け"], works["公休"]]
                 model.AddAllowedAssignments([shifts[(s_idx, d_idx)]], [(s,) for s in allowed_shifts])
+        
+        # それ以外の平日の場合、UIで設定された日勤人数ルールを適用
         else:
             required_nikkin = nikkin_requirements[date.weekday()]
             if required_nikkin > 0:
@@ -54,6 +59,7 @@ def create_shift_schedule(year, month, staff_names, holiday_requests, work_reque
                     model.Add(shifts[(s_idx, d_idx)] == works["日勤"]).OnlyEnforceIf(is_on_nikkin[s_idx])
                     model.Add(shifts[(s_idx, d_idx)] != works["日勤"]).OnlyEnforceIf(is_on_nikkin[s_idx].Not())
                 model.Add(sum(is_on_nikkin) == required_nikkin)
+        # ▲▲▲ 修正完了 ▲▲▲
 
     for s_idx in range(staff_count):
         for d_idx in range(num_days):
@@ -150,8 +156,6 @@ def create_shift_schedule(year, month, staff_names, holiday_requests, work_reque
         for s_idx, s_name in enumerate(staff_names):
             schedule[s_name] = [works_inv_symbols[solver.Value(shifts[(s_idx, d_idx)])] for d_idx in range(num_days)]
         df = pd.DataFrame(schedule).T
-        weekdays_jp = ["月", "火", "水", "木", "金", "土", "日"]
-        df.columns = [f"{date.day} {weekdays_jp[date.weekday()]}" for date in dates]
         return df, "success"
     else:
         return None, "failed"
@@ -191,11 +195,14 @@ cols = st.columns(7)
 nikkin_requirements = []
 for i, day in enumerate(weekdays):
     with cols[i]:
-        is_sunday = (i == 6)
-        default_val = 1 if i == 4 else 0 if i >= 5 else 2
+        is_holiday_weekday = (i >= 5) # 土日の場合
+        default_val = 1 if i == 4 else 0 if is_holiday_weekday else 2
         saved_nikkin_count = get_state(f'nikkin_{i}', default_val)
-        if is_sunday:
-            nikkin_requirements.append(st.number_input(day, min_value=0, max_value=0, value=0, key=f"nikkin_{i}", disabled=True, help="日曜日の日勤はルールで0人に固定されています。"))
+        
+        # ▼▼▼【修正点】土日・祝日の入力欄をロック ▼▼▼
+        # このUIは平日のみ有効で、土日祝は内部ロジックで0人に固定されることを明記
+        if is_holiday_weekday:
+            nikkin_requirements.append(st.number_input(day, min_value=0, max_value=0, value=0, key=f"nikkin_{i}", disabled=True, help="土日・祝日の日勤は0人に固定されています。"))
         else:
             nikkin_requirements.append(st.number_input(day, min_value=0, max_value=staff_count, value=int(saved_nikkin_count), key=f"nikkin_{i}"))
         
@@ -206,8 +213,8 @@ for i, name in enumerate(staff_names):
     if saved_name != name:
         localS.setItem(f'staff_name_{i}', name)
 for i in range(7):
-    if i != 6:
-        default_val = 1 if i == 4 else 0 if i >= 5 else 2
+    if i < 5: # 平日のみ保存
+        default_val = 1 if i == 4 else 2
         saved_nikkin_count = get_state(f'nikkin_{i}', default_val)
         if saved_nikkin_count != nikkin_requirements[i]:
             localS.setItem(f'nikkin_{i}', nikkin_requirements[i])
@@ -276,19 +283,30 @@ if st.session_state.schedule_df is not None:
     # ▼▼▼【ここからが修正部分です】▼▼▼
     df_for_display = st.session_state.schedule_df.copy()
     
-    # ヘッダーを2行にするため、列名を改行文字(\n)入りに変更
+    # ヘッダーを2行にするための準備
     weekdays_jp = ["月", "火", "水", "木", "金", "土", "日"]
-    new_columns = []
-    for day_str in df_for_display.columns:
-        day_num = day_str.split(' ')[0]
-        day_of_week = day_str.split(' ')[1]
-        new_columns.append(f"{day_num}\n{day_of_week}")
-    df_for_display.columns = new_columns
+    dates_for_header = [pd.Timestamp(f"{year}-{month}-{d}") for d in range(1, calendar.monthrange(year, month)[1] + 1)]
+    holidays_for_header = [d[0].day for d in jpholiday.month_holidays(year, month)]
     
-    # Pandas Styler を使って中央ぞろえとヘッダーの改行を適用
-    styler = df_for_display.style.set_properties(**{'text-align': 'center'}).set_table_styles(
-        [{'selector': 'th.col_heading', 'props': 'white-space: pre-wrap;'}]
-    )
+    # 縦2列のヘッダーを作成
+    header_tuples = []
+    for date in dates_for_header:
+        header_tuples.append((str(date.day), weekdays_jp[date.weekday()]))
+    df_for_display.columns = pd.MultiIndex.from_tuples(header_tuples)
+
+    # 背景色を付けるための関数
+    def highlight_holidays(col):
+        day_num = int(col.name[0])
+        date = pd.Timestamp(f"{year}-{month}-{day_num}")
+        is_holiday = date.day in holidays_for_header
+        is_sunday = date.weekday() == 6
+        if is_holiday or is_sunday:
+            return ['background-color: #F0F8FF'] * len(col)
+        return [''] * len(col)
+
+    # スタイルを適用
+    styler = df_for_display.style.set_properties(**{'text-align': 'center'}).apply(highlight_holidays, axis=0)
+    
     st.dataframe(styler)
     
     st.subheader("サマリー")
