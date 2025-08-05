@@ -7,7 +7,7 @@ from datetime import datetime
 from streamlit_local_storage import LocalStorage
 
 # --- シフト作成のコアロジック（関数として定義） ---
-def create_shift_schedule(year, month, staff_names, holiday_requests, work_requests, nikkin_requirements, fixed_shifts, fairness_weight):
+def create_shift_schedule(year, month, staff_names, holiday_requests, work_requests, nikkin_requirements, fixed_shifts, fairness_weight, max_half_days):
     staff_count = len(staff_names)
     works = {"公休": 0, "日勤": 1, "半日": 2, "当直": 3, "明け": 4}
     work_symbols = {"公休": "ヤ", "日勤": "", "半日": "半", "当直": "△", "明け": "▲"}
@@ -107,6 +107,16 @@ def create_shift_schedule(year, month, staff_names, holiday_requests, work_reque
             work_id = works.get(work_name)
             if work_id is not None:
                 model.Add(shifts[(s_idx, d_idx)] == work_id)
+    
+    # ▼▼▼【ここからが追加部分です】▼▼▼
+    # C4.5: 半日勤務回数の上限
+    for s_idx in range(staff_count):
+        is_half_day_bools = [model.NewBoolVar(f's{s_idx}_d{d_idx}_is_half') for d_idx in range(num_days)]
+        for d_idx in range(num_days):
+            model.Add(shifts[(s_idx, d_idx)] == works["半日"]).OnlyEnforceIf(is_half_day_bools[d_idx])
+            model.Add(shifts[(s_idx, d_idx)] != works["半日"]).OnlyEnforceIf(is_half_day_bools[d_idx].Not())
+        model.Add(sum(is_half_day_bools) <= max_half_days)
+    # ▲▲▲ 追加完了 ▲▲▲
 
     total_hours_per_staff = [model.NewIntVar(0, num_days * 16, f"total_hours_{s_idx}") for s_idx in range(staff_count)]
     hours_list = [0] * len(works)
@@ -190,11 +200,9 @@ cols = st.columns(7)
 nikkin_requirements = []
 for i, day in enumerate(weekdays):
     with cols[i]:
-        # ▼▼▼【修正点】土曜日(i=5)のロックを解除し、日曜日(i=6)のみをロック ▼▼▼
         is_sunday = (i == 6)
-        default_val = 1 if i == 4 else 0 if i >= 5 else 2 # 土曜のデフォルトは0
+        default_val = 1 if i == 4 else 0 if i >= 5 else 2
         saved_nikkin_count = get_state(f'nikkin_{i}', default_val)
-        
         if is_sunday:
             nikkin_requirements.append(st.number_input(day, min_value=0, max_value=0, value=0, key=f"nikkin_{i}", disabled=True, help="日曜・祝日の日勤は0人に固定されています。"))
         else:
@@ -207,13 +215,11 @@ for i, name in enumerate(staff_names):
     if saved_name != name:
         localS.setItem(f'staff_name_{i}', name)
 for i in range(7):
-    # ▼▼▼【修正点】土曜日(i=5)の設定も保存するように変更 ▼▼▼
-    if i != 6: # 日曜日以外
+    if i != 6:
         default_val = 1 if i == 4 else 0 if i == 5 else 2
         saved_nikkin_count = get_state(f'nikkin_{i}', default_val)
         if saved_nikkin_count != nikkin_requirements[i]:
             localS.setItem(f'nikkin_{i}', nikkin_requirements[i])
-# ▲▲▲ 修正完了 ▲▲▲
 
 with st.expander("⚙️ 高度な設定: 最適化のバランス調整"):
     fairness_weight = st.slider(
@@ -221,6 +227,13 @@ with st.expander("⚙️ 高度な設定: 最適化のバランス調整"):
         min_value=0, max_value=20, value=8,
         help="数値を小さくすると総労働時間が目標値に近づくことを優先します。数値を大きくすると当直回数を厳密に揃えることを優先します。デフォルトは8です。"
     )
+    # ▼▼▼【ここからが追加部分です】▼▼▼
+    max_half_days = st.slider(
+        "各スタッフの半日勤務の上限回数",
+        min_value=2, max_value=4, value=2,
+        help="1人あたりの月間半日勤務の最大回数を設定します。通常は2回、状況に応じて4回まで増やせます。"
+    )
+    # ▲▲▲ 追加完了 ▲▲▲
 
 st.header("4. スタッフごとの希望")
 holiday_requests = {}
@@ -273,7 +286,7 @@ if st.button("🚀 シフトを作成する", type="primary"):
         st.session_state.schedule_df = None
     else:
         with st.spinner("最適なシフトを計算中です..."):
-            df, status = create_shift_schedule(year, month, staff_names, holiday_requests, work_requests, nikkin_requirements, st.session_state.fixed_shifts, fairness_weight)
+            df, status = create_shift_schedule(year, month, staff_names, holiday_requests, work_requests, nikkin_requirements, st.session_state.fixed_shifts, fairness_weight, max_half_days)
         if status == "success":
             st.session_state.schedule_df = df
         else:
@@ -293,9 +306,13 @@ if st.session_state.schedule_df is not None:
         header_tuples.append((str(date.day), weekdays_jp[date.weekday()]))
     df_for_display.columns = pd.MultiIndex.from_tuples(header_tuples)
 
-    styler = df_for_display.style.set_properties(**{'text-align': 'center'}).set_table_styles(
-        [{'selector': 'th.col_heading', 'props': 'white-space: pre-wrap;'}]
-    )
+    styler = df_for_display.style.set_properties(**{'text-align': 'center'}).set_table_styles([
+        {'selector': 'th.col_heading', 'props': [
+            ('white-space', 'pre-wrap;'),
+            ('text-align', 'center')
+        ]},
+        {'selector': 'th.row_heading', 'props': [('text-align', 'center')]}
+    ])
     st.dataframe(styler)
     
     st.subheader("サマリー")
@@ -308,7 +325,11 @@ if st.session_state.schedule_df is not None:
     st.dataframe(summary_df[['総労働時間', '勤務日数', '当直回数']])
 
     csv_df = st.session_state.schedule_df.copy()
-    csv_df.columns = [col[0] for col in header_tuples] # CSV用にヘッダーを1行に戻す
+    new_columns_for_csv = []
+    for day_tuple in header_tuples:
+        new_columns_for_csv.append(f"{day_tuple[0]} {day_tuple[1]}")
+    csv_df.columns = new_columns_for_csv
+    
     csv = csv_df.to_csv(index=True, encoding='utf-8-sig').encode('utf-8-sig')
     st.download_button(
         label="📄 CSVファイルをダウンロード",
