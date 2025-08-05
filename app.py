@@ -85,7 +85,7 @@ def create_shift_schedule(year, month, staff_names, holiday_requests, work_reque
                 for s_idx in range(staff_count):
                     model.Add(shifts[(s_idx, d_idx)] == works["日勤"]).OnlyEnforceIf(is_on_nikkin[s_idx])
                     model.Add(shifts[(s_idx, d_idx)] != works["日勤"]).OnlyEnforceIf(is_on_nikkin[s_idx].Not())
-                model.Add(sum(is_on_nikkin) == required_nikkin)
+                model.Add(sum(is_on_nikkin) >= required_nikkin) 
 
     for s_idx in range(staff_count):
         for d_idx in range(num_days):
@@ -371,3 +371,4 @@ if st.session_state.schedule_df is not None:
         file_name=f"shift_{year}_{month}.csv",
         mime="text/csv",
     )
+
