@@ -6,7 +6,44 @@ import calendar
 from datetime import datetime
 from streamlit_local_storage import LocalStorage
 
-# --- シフト作成のコアロジック（関数として定義） ---
+# --- 事前チェック機能 ---
+def pre_check_constraints(staff_names, holiday_requests, work_requests, fixed_shifts):
+    # 矛盾チェック1: 個人の希望休と出勤希望の重複
+    for name in staff_names:
+        holiday_set = set(holiday_requests.get(name, []))
+        work_set = set(work_requests.get(name, []))
+        if not holiday_set.isdisjoint(work_set):
+            day = holiday_set.intersection(work_set).pop()
+            return f"❌ **{name}さん**の希望休（{day}日）と出勤希望（{day}日）が重複しています。"
+
+    # 矛盾チェック2: 固定シフトと希望の重複
+    for fix in fixed_shifts:
+        name = fix['staff']
+        day = fix['day']
+        work_symbol = fix['work']
+        
+        # 固定シフトと希望休の重複
+        if day in holiday_requests.get(name, []):
+            return f"❌ **{name}さん**の固定シフト（{day}日：{work_symbol or '日勤'}）と希望休（{day}日）が重複しています。"
+        
+        # 固定シフトが「公休」なのに、出勤希望日になっている
+        if work_symbol == "ヤ" and day in work_requests.get(name, []):
+            return f"❌ **{name}さん**の固定シフト（{day}日：公休）と出勤希望（{day}日）が重複しています。"
+
+    # 矛盾チェック3: 固定シフト間のルール違反
+    from collections import defaultdict
+    fixed_duty_counts = defaultdict(int)
+    for fix in fixed_shifts:
+        if fix['work'] == "△": # 当直
+            fixed_duty_counts[fix['day']] += 1
+    
+    for day, count in fixed_duty_counts.items():
+        if count > 1:
+            return f"❌ **{day}日**の当直に{count}人が固定されています。当直は1日1人までです。"
+            
+    return None # 矛盾がない場合は None を返す
+
+# --- シフト作成のコアロジック ---
 def create_shift_schedule(year, month, staff_names, holiday_requests, work_requests, nikkin_requirements, fixed_shifts, max_half_days):
     staff_count = len(staff_names)
     works = {"公休": 0, "日勤": 1, "半日": 2, "当直": 3, "明け": 4}
@@ -115,8 +152,6 @@ def create_shift_schedule(year, month, staff_names, holiday_requests, work_reque
             model.Add(shifts[(s_idx, d_idx)] != works["半日"]).OnlyEnforceIf(is_half_day_bools[d_idx].Not())
         model.Add(sum(is_half_day_bools) <= max_half_days)
 
-    # ▼▼▼【ここからが修正部分です】▼▼▼
-    # C5: 総労働時間を厳格なルールとして設定
     total_hours_per_staff = [model.NewIntVar(0, num_days * 16, f"total_hours_{s_idx}") for s_idx in range(staff_count)]
     hours_list = [0] * len(works)
     for name, id in works.items():
@@ -126,10 +161,8 @@ def create_shift_schedule(year, month, staff_names, holiday_requests, work_reque
         for d_idx in range(num_days):
             model.AddElement(shifts[(s_idx, d_idx)], hours_list, daily_hour_vars[d_idx])
         model.Add(total_hours_per_staff[s_idx] == sum(daily_hour_vars))
-        # 総労働時間を目標値に完全に一致させる
         model.Add(total_hours_per_staff[s_idx] == target_hours)
 
-    # C6: 最適化目標を「当直回数の公平化」のみにする
     duty_counts = [model.NewIntVar(0, num_days, f"duty_{s_idx}") for s_idx in range(staff_count)]
     for s_idx in range(staff_count):
         is_duty_bools = [model.NewBoolVar(f's{s_idx}_d{d_idx}_is_duty_count') for d_idx in range(num_days)]
@@ -145,7 +178,6 @@ def create_shift_schedule(year, month, staff_names, holiday_requests, work_reque
     model.Add(duty_difference == max_duty - min_duty)
 
     model.Minimize(duty_difference)
-    # ▲▲▲ 修正完了 ▲▲▲
 
     solver = cp_model.CpSolver()
     solver.parameters.max_time_in_seconds = 30.0
@@ -216,14 +248,12 @@ for i in range(7):
         if saved_nikkin_count != nikkin_requirements[i]:
             localS.setItem(f'nikkin_{i}', nikkin_requirements[i])
 
-# ▼▼▼【修正点】バランス調整スライダーを削除し、半日勤務スライダーのみにする ▼▼▼
 with st.expander("⚙️ 高度な設定"):
     max_half_days = st.slider(
         "各スタッフの半日勤務の上限回数",
         min_value=0, max_value=4, value=2,
-        help="1人あたりの月間半日勤務の最大回数。労働時間を厳密に調整するために使われます。通常は0-2回、状況に応じて4回まで増やせます。"
+        help="1人あたりの月間半日勤務の最大回数。労働時間を厳密に調整するために使われます。"
     )
-# ▲▲▲ 修正完了 ▲▲▲
 
 st.header("4. スタッフごとの希望")
 holiday_requests = {}
@@ -246,7 +276,7 @@ with col1:
 with col2:
     fixed_day = st.selectbox("日付を選択", options=all_days, key="fix_day", index=None, placeholder="日を選択...")
 with col3:
-    fixed_work = st.selectbox("勤務を選択", options=["", "半", "△", "▲"], key="fix_work", index=None, placeholder="勤務を選択...")
+    fixed_work = st.selectbox("勤務を選択", options=["", "半", "△", "▲", "ヤ"], key="fix_work", index=None, placeholder="勤務を選択...")
 with col4:
     st.write("") 
     st.write("")
@@ -271,7 +301,14 @@ st.header("6. シフト作成")
 if 'schedule_df' not in st.session_state:
     st.session_state.schedule_df = None
 if st.button("🚀 シフトを作成する", type="primary"):
-    if len(staff_names) != len(set(staff_names)):
+    # ▼▼▼【ここからが修正部分です】▼▼▼
+    # 事前チェックを実行
+    error_message = pre_check_constraints(staff_names, holiday_requests, work_requests, st.session_state.fixed_shifts)
+    if error_message:
+        st.error(error_message)
+        st.session_state.schedule_df = None
+    # ▲▲▲ 修正完了 ▲▲▲
+    elif len(staff_names) != len(set(staff_names)):
         st.error("エラー: スタッフの名前が重複しています。それぞれ違う名前にしてください。")
         st.session_state.schedule_df = None
     else:
@@ -281,7 +318,7 @@ if st.button("🚀 シフトを作成する", type="primary"):
             st.session_state.schedule_df = df
         else:
             st.session_state.schedule_df = None
-            st.error("❌ シフトの作成に失敗しました。条件が厳しすぎる可能性があります。")
+            st.error("❌ シフトの作成に失敗しました。条件が複雑で解決できない可能性があります（例：希望休が多すぎるなど）。")
 
 if st.session_state.schedule_df is not None:
     st.success("✅ シフトの作成に成功しました！")
