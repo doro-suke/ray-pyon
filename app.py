@@ -7,6 +7,16 @@ from datetime import datetime
 from streamlit_local_storage import LocalStorage
 from collections import defaultdict
 
+# --- 定数定義 ---
+WORKS = {"公休": 0, "日勤": 1, "半日": 2, "当直": 3, "明け": 4}
+WORK_SYMBOLS = {"公休": "ヤ", "日勤": "", "半日": "半", "当直": "△", "明け": "▲"}
+WORK_HOURS = {"公休": 0, "日勤": 8, "半日": 4, "当直": 16, "明け": 0}
+# 逆引き辞書もここで定義しておくと便利
+WORKS_INV = {v: k for k, v in WORKS.items()}
+SYMBOLS_INV_WORKS = {v: k for k, v in WORK_SYMBOLS.items()}
+MAX_CONSECUTIVE_WORK_DAYS = 4
+DEFAULT_NUM_HOLIDAYS = 10
+
 # --- 事前チェック機能 ---
 def pre_check_constraints(staff_names, holiday_requests, work_requests, fixed_shifts):
     work_symbols = {"公休": "ヤ", "日勤": "", "半日": "半", "当直": "△", "明け": "▲"}
@@ -175,10 +185,10 @@ def create_shift_schedule(year, month, staff_names, holiday_requests, work_reque
     duty_counts = [model.NewIntVar(0, num_days, f"duty_{s_idx}") for s_idx in range(staff_count)]
     for s_idx in range(staff_count):
         is_duty_bools = [model.NewBoolVar(f's{s_idx}_d{d_idx}_is_duty_count') for d_idx in range(num_days)]
-        for d_idx in range(num_days):
-            model.Add(shifts[(s_idx, d_idx)] == works["当直"]).OnlyEnforceIf(is_duty_bools[d_idx])
-            model.Add(shifts[(s_idx, d_idx)] != works["当直"]).OnlyEnforceIf(is_duty_bools[d_idx].Not())
-        model.Add(duty_counts[s_idx] == sum(is_duty_bools))
+            for d_idx in range(num_days):
+                # .Leftrightarrow() を使う
+                model.Add(shifts[(s_idx, d_idx)] == WORKS["当直"]).Leftrightarrow(is_duty_bools[d_idx])
+            model.Add(duty_counts[s_idx] == sum(is_duty_bools))
     
     min_duty, max_duty = model.NewIntVar(0, 10, 'min_d'), model.NewIntVar(0, 10, 'max_d')
     model.AddMinEquality(min_duty, duty_counts)
@@ -219,7 +229,10 @@ with col2:
     month = st.number_input("対象月", min_value=1, max_value=12, value=datetime.now().month)
 with col3:
     saved_staff_count = get_state('staff_count', 6)
-    staff_count = st.number_input("スタッフ人数", min_value=1, max_value=20, value=int(saved_staff_count), key="staff_count")
+    staff_count = st.number_input("スタッフ人数", min_value=1, max_value=20, value=int(saved_staff_count),
+    key="staff_count_input", # keyを変更
+    on_change=lambda: save_setting('staff_count', st.session_state.staff_count_input)
+)
 
 st.header("2. スタッフの名前")
 default_names = ["山田", "鈴木", "佐藤", "田中", "高橋", "渡辺", "伊藤", "山本", "中村", "小林",
@@ -371,4 +384,5 @@ if st.session_state.schedule_df is not None:
         file_name=f"shift_{year}_{month}.csv",
         mime="text/csv",
     )
+
 
