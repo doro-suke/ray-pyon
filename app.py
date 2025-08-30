@@ -120,8 +120,8 @@ def create_shift_schedule(year, month, staff_names, holiday_requests, work_reque
                 model.Add(shifts[(s_idx, d_idx)] != WORKS["明け"]).OnlyEnforceIf(is_ake_today.Not())
                 model.Add(shifts[(s_idx, d_idx + 1)] == WORKS["公休"]).OnlyEnforceIf(is_ake_today)
 
-    # C3: 最大連勤日数の制限 (5日以上の連続勤務を禁止)
-    max_consecutive_days = 4
+    # C3: 最大連勤日数の制限 (4日以上の連続勤務を禁止)
+    max_consecutive_days = 3
     for s_idx in range(staff_count):
         for d_idx in range(num_days - max_consecutive_days):
             is_off_in_window = [model.NewBoolVar(f's{s_idx}_d{i}_is_off') for i in range(d_idx, d_idx + max_consecutive_days + 1)]
@@ -394,4 +394,5 @@ if st.session_state.schedule_df is not None:
         file_name=f"shift_{year}_{month}.csv",
         mime="text/csv",
     )
+
 
