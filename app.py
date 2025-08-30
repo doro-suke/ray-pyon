@@ -53,14 +53,14 @@ def pre_check_constraints(staff_names, holiday_requests, work_requests, fixed_sh
     return None
 
 # --- シフト作成のコアロジック ---
-def create_shift_schedule(year, month, staff_names, holiday_requests, work_requests, nikkin_requirements, fixed_shifts, max_half_days):
+def create_shift_schedule(year, month, staff_names, holiday_requests, work_requests, nikkin_requirements, fixed_shifts, max_half_days, holiday_request_priority, fairness_priority):
     staff_count = len(staff_names)
 
     try:
         num_days = calendar.monthrange(year, month)[1]
     except calendar.IllegalMonthError:
         st.error("有効な月を入力してください（1-12）。")
-        return None, None
+        return None, "failed", []
 
     target_hours = 168 if num_days == 31 else 160
 
@@ -69,31 +69,26 @@ def create_shift_schedule(year, month, staff_names, holiday_requests, work_reque
 
     model = cp_model.CpModel()
     
-    # ▼▼▼【エラー修正】この部分が欠落していました。シフト変数をここで定義します。▼▼▼
     shifts = {}
     for s_idx in range(staff_count):
         for d_idx in range(num_days):
             shifts[(s_idx, d_idx)] = model.NewIntVar(0, len(WORKS) - 1, f"shift_s{s_idx}_d{d_idx}")
-    # ▲▲▲ 修正完了 ▲▲▲
 
-    # --- 制約 ---
+    # --- ハード制約 (必ず守るルール) ---
     # C1: 日ごとの必要人数と勤務の割り当て
     for d_idx, date in enumerate(dates):
-        # C1-1: 当直は毎日1人
         is_on_duty = [model.NewBoolVar(f'd{d_idx}_s{s_idx}_is_duty') for s_idx in range(staff_count)]
         for s_idx in range(staff_count):
             model.Add(shifts[(s_idx, d_idx)] == WORKS["当直"]).OnlyEnforceIf(is_on_duty[s_idx])
             model.Add(shifts[(s_idx, d_idx)] != WORKS["当直"]).OnlyEnforceIf(is_on_duty[s_idx].Not())
         model.Add(sum(is_on_duty) == 1)
         
-        # C1-2: 日曜・祝日は日勤なし
         is_holiday_or_sunday = (date.weekday() == 6) or (date.day in holidays_jp)
         if is_holiday_or_sunday:
             for s_idx in range(staff_count):
                 allowed_shifts = [WORKS["当直"], WORKS["明け"], WORKS["公休"]]
                 model.AddAllowedAssignments([shifts[(s_idx, d_idx)]], [(s,) for s in allowed_shifts])
         else:
-            # C1-3: 平日の日勤必要人数
             required_nikkin = nikkin_requirements[date.weekday()]
             if required_nikkin > 0:
                 is_on_nikkin = [model.NewBoolVar(f'd{d_idx}_s{s_idx}_is_nikkin') for s_idx in range(staff_count)]
@@ -105,23 +100,20 @@ def create_shift_schedule(year, month, staff_names, holiday_requests, work_reque
     # C2: 勤務の連続性に関するルール
     for s_idx in range(staff_count):
         for d_idx in range(num_days):
-            # C2-1: 当直 -> 明け -> 公休 の流れ
             if d_idx < num_days - 1:
-                # 当直の翌日は必ず明け
                 is_duty_today = model.NewBoolVar(f's{s_idx}_d{d_idx}_is_duty_c2')
                 model.Add(shifts[(s_idx, d_idx)] == WORKS["当直"]).OnlyEnforceIf(is_duty_today)
                 model.Add(shifts[(s_idx, d_idx)] != WORKS["当直"]).OnlyEnforceIf(is_duty_today.Not())
                 model.Add(shifts[(s_idx, d_idx + 1)] == WORKS["明け"]).OnlyEnforceIf(is_duty_today)
             
             if d_idx < num_days - 1:
-                 # 明けの翌日は必ず公休
                 is_ake_today = model.NewBoolVar(f's{s_idx}_d{d_idx}_is_ake_c2')
                 model.Add(shifts[(s_idx, d_idx)] == WORKS["明け"]).OnlyEnforceIf(is_ake_today)
                 model.Add(shifts[(s_idx, d_idx)] != WORKS["明け"]).OnlyEnforceIf(is_ake_today.Not())
                 model.Add(shifts[(s_idx, d_idx + 1)] == WORKS["公休"]).OnlyEnforceIf(is_ake_today)
 
-    # C3: 最大連勤日数の制限 (4日以上の連続勤務を禁止)
-    max_consecutive_days = 3
+    # C3: 最大連勤日数の制限
+    max_consecutive_days = 4
     for s_idx in range(staff_count):
         for d_idx in range(num_days - max_consecutive_days):
             is_off_in_window = [model.NewBoolVar(f's{s_idx}_d{i}_is_off') for i in range(d_idx, d_idx + max_consecutive_days + 1)]
@@ -130,30 +122,19 @@ def create_shift_schedule(year, month, staff_names, holiday_requests, work_reque
                 model.Add(shifts[(s_idx, day_index)] != WORKS["公休"]).OnlyEnforceIf(is_off_in_window[i].Not())
             model.Add(sum(is_off_in_window) >= 1)
 
-    # C4: スタッフの希望と固定シフトの反映
-    for s_idx, s_name in enumerate(staff_names):
-        # 希望休
-        for day_off in holiday_requests.get(s_name, []):
-            if 1 <= day_off <= num_days:
-                model.Add(shifts[(s_idx, day_off - 1)] == WORKS["公休"])
-        # 出勤希望
-        for day_on in work_requests.get(s_name, []):
-            if 1 <= day_on <= num_days:
-                model.Add(shifts[(s_idx, day_on - 1)] != WORKS["公休"])
-    # 固定シフト
+    # C4: 固定シフトの反映
     for fix in fixed_shifts:
         s_name = fix['staff']
-        day = fix['day']
-        work_symbol = fix['work']
-        work_name = SYMBOLS_INV_WORKS.get(work_symbol)
-        if s_name in staff_names and work_name:
+        if s_name in staff_names:
             s_idx = staff_names.index(s_name)
-            d_idx = day - 1
-            work_id = WORKS.get(work_name)
-            if work_id is not None:
-                model.Add(shifts[(s_idx, d_idx)] == work_id)
+            d_idx = fix['day'] - 1
+            work_name = SYMBOLS_INV_WORKS.get(fix['work'])
+            if work_name:
+                work_id = WORKS.get(work_name)
+                if work_id is not None:
+                    model.Add(shifts[(s_idx, d_idx)] == work_id)
     
-    # C5: 半日勤務の上限回数
+    # C5: 半日勤務の上限回数など
     for s_idx in range(staff_count):
         is_half_day_bools = [model.NewBoolVar(f's{s_idx}_d{d_idx}_is_half') for d_idx in range(num_days)]
         for d_idx in range(num_days):
@@ -161,32 +142,46 @@ def create_shift_schedule(year, month, staff_names, holiday_requests, work_reque
             model.Add(shifts[(s_idx, d_idx)] != WORKS["半日"]).OnlyEnforceIf(is_half_day_bools[d_idx].Not())
         model.Add(sum(is_half_day_bools) <= max_half_days)
 
-    # C6: 公休と総労働時間のルール
-    total_hours_per_staff = [model.NewIntVar(0, num_days * 16, f"total_hours_{s_idx}") for s_idx in range(staff_count)]
-    hours_list = [0] * len(WORKS)
-    for name, id in WORKS.items():
-        hours_list[id] = WORK_HOURS.get(name, 0)
-
-    for s_idx in range(staff_count):
-        # ルール1: 公休の日数を8日～10日の範囲で変動させるように変更
         is_holiday_bools = [model.NewBoolVar(f's{s_idx}_d{d_idx}_is_holiday') for d_idx in range(num_days)]
         for d_idx in range(num_days):
             model.Add(shifts[(s_idx, d_idx)] == WORKS["公休"]).OnlyEnforceIf(is_holiday_bools[d_idx])
             model.Add(shifts[(s_idx, d_idx)] != WORKS["公休"]).OnlyEnforceIf(is_holiday_bools[d_idx].Not())
         model.AddLinearConstraint(sum(is_holiday_bools), 8, 10)
 
-        # 総労働時間を計算する
+        total_hours_per_staff = model.NewIntVar(0, num_days * 16, f"total_hours_{s_idx}")
+        hours_list = [WORK_HOURS.get(WORKS_INV_SYMBOLS[i], 0) for i in range(len(WORKS))]
         daily_hour_vars = [model.NewIntVar(0, 16, f's{s_idx}_d{d_idx}_hours') for d_idx in range(num_days)]
         for d_idx in range(num_days):
             model.AddElement(shifts[(s_idx, d_idx)], hours_list, daily_hour_vars[d_idx])
-        model.Add(total_hours_per_staff[s_idx] == sum(daily_hour_vars))
+        model.Add(total_hours_per_staff == sum(daily_hour_vars))
         
-        # ルール2: 総労働時間を目標±12時間の範囲に収める
         tolerance = 12
-        model.Add(total_hours_per_staff[s_idx] >= target_hours - tolerance)
-        model.Add(total_hours_per_staff[s_idx] <= target_hours + tolerance)
+        model.Add(total_hours_per_staff >= target_hours - tolerance)
+        model.Add(total_hours_per_staff <= target_hours + tolerance)
 
-    # C7: 最適化目標 - 当直回数の公平化
+    # --- ソフト制約 (ペナルティを最小化するルール) ---
+    all_penalty_terms = []
+    missed_requests_log = []
+
+    # S1: スタッフの希望をソフト制約として反映
+    for s_idx, s_name in enumerate(staff_names):
+        for day_off in holiday_requests.get(s_name, []):
+            if 1 <= day_off <= num_days:
+                penalty_var = model.NewBoolVar(f'missed_holiday_s{s_idx}_d{day_off-1}')
+                model.Add(shifts[(s_idx, day_off - 1)] != WORKS["公休"]).OnlyEnforceIf(penalty_var)
+                model.Add(shifts[(s_idx, day_off - 1)] == WORKS["公休"]).OnlyEnforceIf(penalty_var.Not())
+                all_penalty_terms.append(penalty_var * holiday_request_priority)
+                missed_requests_log.append({'type': '希望休', 'var': penalty_var, 'staff': s_name, 'day': day_off})
+
+        for day_on in work_requests.get(s_name, []):
+            if 1 <= day_on <= num_days:
+                penalty_var = model.NewBoolVar(f'missed_work_s{s_idx}_d{day_on-1}')
+                model.Add(shifts[(s_idx, day_on - 1)] == WORKS["公休"]).OnlyEnforceIf(penalty_var)
+                model.Add(shifts[(s_idx, day_on - 1)] != WORKS["公休"]).OnlyEnforceIf(penalty_var.Not())
+                all_penalty_terms.append(penalty_var * holiday_request_priority)
+                missed_requests_log.append({'type': '出勤希望', 'var': penalty_var, 'staff': s_name, 'day': day_on})
+    
+    # S2: 当直回数の公平化
     duty_counts = [model.NewIntVar(0, num_days, f"duty_{s_idx}") for s_idx in range(staff_count)]
     for s_idx in range(staff_count):
         is_duty_bools = [model.NewBoolVar(f's{s_idx}_d{d_idx}_is_duty_count') for d_idx in range(num_days)]
@@ -200,8 +195,10 @@ def create_shift_schedule(year, month, staff_names, holiday_requests, work_reque
     model.AddMaxEquality(max_duty, duty_counts)
     duty_difference = model.NewIntVar(0, 10, 'duty_diff')
     model.Add(duty_difference == max_duty - min_duty)
+    all_penalty_terms.append(duty_difference * fairness_priority)
 
-    model.Minimize(duty_difference)
+    # --- 最適化目標 ---
+    model.Minimize(sum(all_penalty_terms))
 
     # --- ソルバーの実行 ---
     solver = cp_model.CpSolver()
@@ -213,9 +210,15 @@ def create_shift_schedule(year, month, staff_names, holiday_requests, work_reque
         for s_idx, s_name in enumerate(staff_names):
             schedule[s_name] = [WORKS_INV_SYMBOLS[solver.Value(shifts[(s_idx, d_idx)])] for d_idx in range(num_days)]
         df = pd.DataFrame(schedule).T
-        return df, "success"
+        
+        unfulfilled_requests = []
+        for log in missed_requests_log:
+            if solver.Value(log['var']) == 1:
+                message = f"**{log['staff']}さん**の**{log['day']}日**の**{log['type']}**"
+                unfulfilled_requests.append(message)
+        return df, "success", unfulfilled_requests
     else:
-        return None, "failed"
+        return None, "failed", []
 
 # --- Streamlit UI ---
 st.set_page_config(page_title="レイぴょん", layout="wide")
@@ -278,6 +281,18 @@ with st.expander("⚙️ 高度な設定"):
         min_value=0, max_value=4, value=2,
         help="1人あたりの月間半日勤務の最大回数。労働時間を調整するために使われます。"
     )
+    st.subheader("制約の優先度設定")
+    holiday_request_priority = st.slider(
+        "希望休・出勤希望の優先度",
+        min_value=1, max_value=100, value=80,
+        help="値が大きいほど、スタッフの希望を優先してシフトを作成します。"
+    )
+    fairness_priority = st.slider(
+        "当直回数の公平性の優先度",
+        min_value=1, max_value=100, value=20,
+        help="値が大きいほど、スタッフ間の当直回数の差をなくすことを優先します。"
+    )
+
 
 st.header("4. スタッフごとの希望")
 holiday_requests = {}
@@ -331,6 +346,9 @@ if st.session_state.fixed_shifts:
 st.header("6. シフト作成")
 if 'schedule_df' not in st.session_state:
     st.session_state.schedule_df = None
+if 'unfulfilled_requests' not in st.session_state:
+    st.session_state.unfulfilled_requests = []
+
 
 if st.button("🚀 シフトを作成する", type="primary"):
     error_message = pre_check_constraints(staff_names, holiday_requests, work_requests, st.session_state.fixed_shifts)
@@ -342,15 +360,26 @@ if st.button("🚀 シフトを作成する", type="primary"):
         st.session_state.schedule_df = None
     else:
         with st.spinner("最適なシフトを計算中です..."):
-            df, status = create_shift_schedule(year, month, staff_names, holiday_requests, work_requests, nikkin_requirements, st.session_state.fixed_shifts, max_half_days)
+            df, status, unfulfilled = create_shift_schedule(
+                year, month, staff_names, holiday_requests, work_requests, 
+                nikkin_requirements, st.session_state.fixed_shifts, max_half_days,
+                holiday_request_priority, fairness_priority
+            )
         if status == "success":
             st.session_state.schedule_df = df
+            st.session_state.unfulfilled_requests = unfulfilled
         else:
             st.session_state.schedule_df = None
-            st.error("❌ シフトの作成に失敗しました。条件が複雑で解決できない可能性があります（例：希望休が多すぎるなど）。")
+            st.session_state.unfulfilled_requests = []
+            st.error("❌ シフトの作成に失敗しました。条件が複雑で解決できない可能性があります。")
 
 if st.session_state.schedule_df is not None:
     st.success("✅ シフトの作成に成功しました！")
+
+    if st.session_state.unfulfilled_requests:
+        st.warning("⚠️ いくつかの希望は、他の制約との兼ね合いで実現できませんでした。")
+        for req in st.session_state.unfulfilled_requests:
+            st.write(f"・ {req}")
     
     df_for_display = st.session_state.schedule_df.copy()
     
@@ -394,5 +423,4 @@ if st.session_state.schedule_df is not None:
         file_name=f"shift_{year}_{month}.csv",
         mime="text/csv",
     )
-
 
