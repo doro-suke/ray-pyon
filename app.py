@@ -188,7 +188,7 @@ def create_shift_schedule(year, month, staff_names, holiday_requests, work_reque
         for d_idx in range(num_days):
                 # .Leftrightarrow() を使う
                 model.Add(shifts[(s_idx, d_idx)] == WORKS["当直"]).Leftrightarrow(is_duty_bools[d_idx])
-            model.Add(duty_counts[s_idx] == sum(is_duty_bools))
+        model.Add(duty_counts[s_idx] == sum(is_duty_bools))
     
     min_duty, max_duty = model.NewIntVar(0, 10, 'min_d'), model.NewIntVar(0, 10, 'max_d')
     model.AddMinEquality(min_duty, duty_counts)
@@ -384,6 +384,7 @@ if st.session_state.schedule_df is not None:
         file_name=f"shift_{year}_{month}.csv",
         mime="text/csv",
     )
+
 
 
 
