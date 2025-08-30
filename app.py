@@ -53,7 +53,7 @@ def pre_check_constraints(staff_names, holiday_requests, work_requests, fixed_sh
     return None
 
 # --- シフト作成のコアロジック ---
-def create_shift_schedule(year, month, staff_names, holiday_requests, work_requests, nikkin_requirements, fixed_shifts, max_half_days, holiday_request_priority, fairness_priority):
+def create_shift_schedule(year, month, staff_names, holiday_requests, work_requests, nikkin_requirements, fixed_shifts, max_half_days, holiday_request_priority, fairness_priority, work_hour_tolerance, max_consecutive_days_input):
     staff_count = len(staff_names)
 
     try:
@@ -113,11 +113,10 @@ def create_shift_schedule(year, month, staff_names, holiday_requests, work_reque
                 model.Add(shifts[(s_idx, d_idx + 1)] == WORKS["公休"]).OnlyEnforceIf(is_ake_today)
 
     # C3: 最大連勤日数の制限
-    max_consecutive_days = 4
     for s_idx in range(staff_count):
-        for d_idx in range(num_days - max_consecutive_days):
-            is_off_in_window = [model.NewBoolVar(f's{s_idx}_d{i}_is_off') for i in range(d_idx, d_idx + max_consecutive_days + 1)]
-            for i, day_index in enumerate(range(d_idx, d_idx + max_consecutive_days + 1)):
+        for d_idx in range(num_days - max_consecutive_days_input):
+            is_off_in_window = [model.NewBoolVar(f's{s_idx}_d{i}_is_off') for i in range(d_idx, d_idx + max_consecutive_days_input + 1)]
+            for i, day_index in enumerate(range(d_idx, d_idx + max_consecutive_days_input + 1)):
                 model.Add(shifts[(s_idx, day_index)] == WORKS["公休"]).OnlyEnforceIf(is_off_in_window[i])
                 model.Add(shifts[(s_idx, day_index)] != WORKS["公休"]).OnlyEnforceIf(is_off_in_window[i].Not())
             model.Add(sum(is_off_in_window) >= 1)
@@ -150,20 +149,17 @@ def create_shift_schedule(year, month, staff_names, holiday_requests, work_reque
 
         total_hours_per_staff = model.NewIntVar(0, num_days * 16, f"total_hours_{s_idx}")
         
-        # ▼▼▼【エラー修正】労働時間の計算ロジックを修正しました ▼▼▼
         hours_list = [0] * len(WORKS)
         for name, id in WORKS.items():
             hours_list[id] = WORK_HOURS.get(name, 0)
-        # ▲▲▲ 修正完了 ▲▲▲
 
         daily_hour_vars = [model.NewIntVar(0, 16, f's{s_idx}_d{d_idx}_hours') for d_idx in range(num_days)]
         for d_idx in range(num_days):
             model.AddElement(shifts[(s_idx, d_idx)], hours_list, daily_hour_vars[d_idx])
         model.Add(total_hours_per_staff == sum(daily_hour_vars))
         
-        tolerance = 12
-        model.Add(total_hours_per_staff >= target_hours - tolerance)
-        model.Add(total_hours_per_staff <= target_hours + tolerance)
+        model.Add(total_hours_per_staff >= target_hours - work_hour_tolerance)
+        model.Add(total_hours_per_staff <= target_hours + work_hour_tolerance)
 
     # --- ソフト制約 (ペナルティを最小化するルール) ---
     all_penalty_terms = []
@@ -282,11 +278,23 @@ for i, day in enumerate(weekdays):
             ))
 
 with st.expander("⚙️ 高度な設定"):
+    st.subheader("基本ルールの調整")
+    work_hour_tolerance = st.slider(
+        "総労働時間の許容範囲 (±時間)",
+        min_value=4, max_value=24, value=12, step=2,
+        help="各スタッフの月間総労働時間について、目標値からのずれを何時間まで許容するか設定します。"
+    )
+    max_consecutive_days_input = st.slider(
+        "最大連勤日数",
+        min_value=3, max_value=7, value=4,
+        help="ここを「5」にすると、6連勤以上はできなくなります。"
+    )
     max_half_days = st.slider(
         "各スタッフの半日勤務の上限回数",
         min_value=0, max_value=4, value=2,
         help="1人あたりの月間半日勤務の最大回数。労働時間を調整するために使われます。"
     )
+    
     st.subheader("制約の優先度設定")
     holiday_request_priority = st.slider(
         "希望休・出勤希望の優先度",
@@ -369,7 +377,7 @@ if st.button("🚀 シフトを作成する", type="primary"):
             df, status, unfulfilled = create_shift_schedule(
                 year, month, staff_names, holiday_requests, work_requests, 
                 nikkin_requirements, st.session_state.fixed_shifts, max_half_days,
-                holiday_request_priority, fairness_priority
+                holiday_request_priority, fairness_priority, work_hour_tolerance, max_consecutive_days_input
             )
         if status == "success":
             st.session_state.schedule_df = df
