@@ -286,7 +286,7 @@ with st.expander("⚙️ 高度な設定"):
     )
     max_consecutive_days_input = st.slider(
         "最大連勤日数",
-        min_value=3, max_value=7, value=4,
+        min_value=3, max_value=5, value=3,
         help="ここを「5」にすると、6連勤以上はできなくなります。"
     )
     max_half_days = st.slider(
@@ -298,12 +298,12 @@ with st.expander("⚙️ 高度な設定"):
     st.subheader("制約の優先度設定")
     holiday_request_priority = st.slider(
         "希望休・出勤希望の優先度",
-        min_value=1, max_value=100, value=80,
+        min_value=0, max_value=100, value=80, step=20,
         help="値が大きいほど、スタッフの希望を優先してシフトを作成します。"
     )
     fairness_priority = st.slider(
         "当直回数の公平性の優先度",
-        min_value=1, max_value=100, value=20,
+        min_value=0, max_value=100, value=40, step=20,
         help="値が大きいほど、スタッフ間の当直回数の差をなくすことを優先します。"
     )
 
