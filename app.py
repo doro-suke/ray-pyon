@@ -149,7 +149,13 @@ def create_shift_schedule(year, month, staff_names, holiday_requests, work_reque
         model.AddLinearConstraint(sum(is_holiday_bools), 8, 10)
 
         total_hours_per_staff = model.NewIntVar(0, num_days * 16, f"total_hours_{s_idx}")
-        hours_list = [WORK_HOURS.get(WORKS_INV_SYMBOLS[i], 0) for i in range(len(WORKS))]
+        
+        # ▼▼▼【エラー修正】労働時間の計算ロジックを修正しました ▼▼▼
+        hours_list = [0] * len(WORKS)
+        for name, id in WORKS.items():
+            hours_list[id] = WORK_HOURS.get(name, 0)
+        # ▲▲▲ 修正完了 ▲▲▲
+
         daily_hour_vars = [model.NewIntVar(0, 16, f's{s_idx}_d{d_idx}_hours') for d_idx in range(num_days)]
         for d_idx in range(num_days):
             model.AddElement(shifts[(s_idx, d_idx)], hours_list, daily_hour_vars[d_idx])
