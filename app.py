@@ -185,7 +185,7 @@ def create_shift_schedule(year, month, staff_names, holiday_requests, work_reque
     duty_counts = [model.NewIntVar(0, num_days, f"duty_{s_idx}") for s_idx in range(staff_count)]
     for s_idx in range(staff_count):
         is_duty_bools = [model.NewBoolVar(f's{s_idx}_d{d_idx}_is_duty_count') for d_idx in range(num_days)]
-            for d_idx in range(num_days):
+        for d_idx in range(num_days):
                 # .Leftrightarrow() を使う
                 model.Add(shifts[(s_idx, d_idx)] == WORKS["当直"]).Leftrightarrow(is_duty_bools[d_idx])
             model.Add(duty_counts[s_idx] == sum(is_duty_bools))
@@ -384,5 +384,6 @@ if st.session_state.schedule_df is not None:
         file_name=f"shift_{year}_{month}.csv",
         mime="text/csv",
     )
+
 
 
