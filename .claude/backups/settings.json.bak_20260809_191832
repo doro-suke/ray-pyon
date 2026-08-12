@@ -1,0 +1,17 @@
+{
+  "permissions": {
+    "deny": [
+      "rm -rf*",
+      "Remove-Item -Recurse -Force*",
+      "git push*--force*",
+      "git push*-f*",
+      "git reset --hard*",
+      "view_file:.env*",
+      "replace_file_content:.env*",
+      "write_to_file:.env*",
+      "*.pem",
+      "*.key"
+    ]
+  },
+  "description": "Cold Edge shared project configuration"
+}
