@@ -62,7 +62,14 @@ def create_shift_schedule(year, month, staff_names, holiday_requests, work_reque
         st.error("有効な月を入力してください（1-12）。")
         return None, "failed", []
 
-    target_hours = 168 if num_days == 31 else 160
+    if month == 2:
+        target_hours = 152
+    elif month == 1:
+        target_hours = 160
+    elif num_days == 31:
+        target_hours = 168
+    else:
+        target_hours = 160
 
     dates = [pd.Timestamp(f"{year}-{month}-{d}") for d in range(1, num_days + 1)]
     holidays_jp = [d[0].day for d in jpholiday.month_holidays(year, month)]
@@ -175,8 +182,10 @@ def create_shift_schedule(year, month, staff_names, holiday_requests, work_reque
             model.AddElement(shifts[(s_idx, d_idx)], hours_list, daily_hour_vars[d_idx])
         model.Add(total_hours_per_staff == sum(daily_hour_vars))
         
+        # 規定時間をオーバーすることは絶対に禁止（上限をハードに固定）
+        # ただし不足分（有給で補う分）は許容範囲として設定可能
         model.Add(total_hours_per_staff >= target_hours - work_hour_tolerance)
-        model.Add(total_hours_per_staff <= target_hours + work_hour_tolerance)
+        model.Add(total_hours_per_staff <= target_hours)
 
     # --- ソフト制約 (ペナルティを最小化するルール) ---
 
@@ -300,9 +309,9 @@ for i, day in enumerate(weekdays):
 with st.expander("⚙️ 高度な設定"):
     st.subheader("基本ルールの調整")
     work_hour_tolerance = st.slider(
-        "総労働時間の許容範囲 (±時間)",
-        min_value=4, max_value=24, value=12, step=2,
-        help="各スタッフの月間総労働時間について、目標値からのずれを何時間まで許容するか設定します。"
+        "労働時間の不足許容範囲（有給補填枠・時間）",
+        min_value=0, max_value=40, value=16, step=8,
+        help="各スタッフの月間総労働時間について、規定時間から「何時間まで少なくてもよいか（有給枠）」を設定します。規定時間をオーバーして働くことは禁止されています。"
     )
     max_consecutive_days_input = st.slider(
         "最大連勤日数",
